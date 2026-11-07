@@ -1,0 +1,57 @@
+{
+  "name": "zcode-statusbar",
+  "version": "0.1.0",
+  "description": "ZCode composer status bar: visual tok/s speed ramp, cumulative tokens, cache hit and subagent state under the input box, plus a color-ramp enhancement for the official context ring. Auto-installs via app.asar injection whenever the client is not injected (always on; a remove/uninstall writes an opt-out marker; modifies app.asar - fully quit and reopen ZCode to take effect). No per-answer text lines, no prompt-submit context injection, no cost/quota features, no network except the Release updater.",
+  "author": {
+    "name": "zcode-statusbar contributors"
+  },
+  "homepage": "https://github.com/zcode-statusbar/zcode-statusbar",
+  "repository": "https://github.com/zcode-statusbar/zcode-statusbar",
+  "license": "MIT",
+  "keywords": [
+    "statusbar",
+    "tok/s",
+    "context",
+    "zcode"
+  ],
+  "hooks": "hooks",
+  "packageLayout": {
+    "schemaVersion": 1,
+    "files": [
+      "LICENSE",
+      "marketplace.json",
+      "plugins/zcode-statusbar/.claude-plugin/plugin.json",
+      "plugins/zcode-statusbar/.zcode-plugin/plugin.json",
+      "plugins/zcode-statusbar/README.md",
+      "plugins/zcode-statusbar/hooks/hooks.json",
+      "plugins/zcode-statusbar/hooks/session-start.py",
+      "core/engine-patch.cjs",
+      "core/inject-main.cjs",
+      "core/install.py",
+      "core/install_monitor.py",
+      "core/patch_install.py",
+      "core/pending_zip_patch.py",
+      "core/plugin_auto_update.py",
+      "core/plugin-release.cjs",
+      "core/plugin-storage.cjs",
+      "core/plugin-updater.cjs",
+      "core/release_unpack.py",
+      "core/renderer_bridge.py",
+      "core/restart_notice.py",
+      "core/runtime_install.py",
+      "core/runtime_lock.py",
+      "core/statusbar-bridge.js",
+      "core/uninstall.py",
+      "core/ramp.js",
+      "core/session-stats.cjs",
+      "core/statusbar.js",
+      "core/turn-stats.js",
+      "core/usage_stats.py",
+      "core/zusage.py"
+    ]
+  },
+  "description_i18n": {
+    "en": "ZCode composer status bar: visual tok/s speed ramp, cumulative tokens, cache hit and subagent state under the input box, plus a color-ramp enhancement for the official context ring. Auto-installs via app.asar injection whenever the client is not injected (always on; a remove/uninstall writes an opt-out marker; modifies app.asar - fully quit and reopen ZCode to take effect). No per-answer text lines, no prompt-submit context injection, no cost/quota features, no network except the Release updater.",
+    "zh-CN": "ZCode 输入框下方状态条：生成速度色阶、累计 token、缓存命中、子代理状态，并对官方上下文圆环叠加连续色阶。未注入时始终自动安装/修复（修改 app.asar，成功后需完全退出并重开；卸载写豁免标记）。不做回答末尾统计行、不做 prompt-submit 模型注入、无费用/额度功能；除 Release 更新检查外不联网。"
+  }
+}
