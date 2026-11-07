@@ -23,6 +23,11 @@
  *    供 R1 常驻控件（轮次·步数）与 R6 详情弹层（模型/工具用时、TTFT、速度趋势、子代理明细）使用。
  * 3. speedTrend 元素为 { t, tokPerSec }（t = 该轮 completedAt），最多保留最近 10 轮。
  * 4. 行 status 严格判定：仅 status === 'completed' 计入完成态；未知状态一律忽略（宁可少算不可串数）。
+ * 5. 返回值再扩展顶层 tools 明细分组 { total, errors, list: [{ name, count, durationMs, errors }] }：
+ *    仅计 kind='tool' 且 status ∈ {completed, error} 的行（running 不计）；total/errors 含 error 行；
+ *    durationMs = Σ(completedAt−startedAt) 且含 error 行（对齐原插件工具明细的有意差异，
+ *    timing.toolTimeMs 仍仅算 completed 行）；时间戳缺失/倒挂的行计次不计时长。
+ *    list 按 count 降序、同次数按工具名升序。
  */
 
 // 有效生成窗口下限（ms）：滤掉瞬时的元请求/探测请求
@@ -103,6 +108,7 @@ function aggregate(rows, now) {
   // 行分类：主会话完成请求 / 主会话完成工具调用 / 子代理行
   const mainCompleted = [];
   const toolCompleted = [];
+  const toolEnded = [];
   const subRows = [];
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
@@ -112,6 +118,7 @@ function aggregate(rows, now) {
     }
     if (row.kind === 'tool') {
       if (row.status === 'completed') toolCompleted.push(row);
+      if (row.status === 'completed' || row.status === 'error') toolEnded.push(row);
       continue;
     }
     if (row.status === 'completed') mainCompleted.push(row);
@@ -167,6 +174,30 @@ function aggregate(rows, now) {
   }
   const ttftMs = ttftN > 0 ? ttftSum / ttftN : null;
 
+  // ---- 工具调用明细（R6 弹层）----
+  // 时长含 error 行：对齐原插件工具明细口径的有意差异；timing.toolTimeMs 仅算 completed 行是既有口径，保持不动。
+  const toolAgg = new Map();
+  let toolTotal = 0;
+  let toolErrorTotal = 0;
+  for (const r of toolEnded) {
+    const name = typeof r.model === 'string' ? r.model : '';
+    toolTotal += 1;
+    if (r.status === 'error') toolErrorTotal += 1;
+    let g = toolAgg.get(name);
+    if (!g) {
+      g = { name: name, count: 0, durationMs: 0, errors: 0 };
+      toolAgg.set(name, g);
+    }
+    g.count += 1;
+    if (r.status === 'error') g.errors += 1;
+    const s = num(r.startedAt);
+    const e = num(r.completedAt);
+    if (s != null && e != null && e >= s) g.durationMs += e - s;
+  }
+  const toolsList = Array.from(toolAgg.values()).sort((a, b) =>
+    b.count !== a.count ? b.count - a.count : a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  );
+
   // ---- 子代理聚合（R5 双态）----
   let activeCount = 0;
   let activeOut = 0;
@@ -213,6 +244,7 @@ function aggregate(rows, now) {
         };
       }),
     },
+    tools: { total: toolTotal, errors: toolErrorTotal, list: toolsList },
   };
 }
 

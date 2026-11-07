@@ -4,7 +4,7 @@
  * 纯函数、无 DOM、无第三方依赖。对应契约：design.md §3 / §9、prd.md R3 / R4。
  *
  * 两条互相独立的色阶：
- *   - speedColor(tokPerSec)：0 红 → 150 绿 → 800 蓝 → ≥2000 紫（封顶）；
+ *   - speedColor(tokPerSec)：0 红 → 150 绿 → 300 蓝 → ≥500 紫（封顶）；
  *   - contextColor(pct)：入参 0–1（占用比例），0 绿 → 0.5 黄 → 0.9 红 → 1 深红。
  *
  * 插值在 hsl 空间分段线性进行：rgb 直接插值会穿过低饱和灰区产生脏色，
@@ -35,15 +35,16 @@
 const NEUTRAL_COLOR = '#8c8c8c';
 
 /**
- * 速度色阶锚点（tok/s → 颜色），分段线性插值，≥2000 封顶为紫。
- * 语义：0 极慢（红）→ 150 正常（绿）→ 800 快（蓝）→ 2000 极快（紫）。
- * 锚点色值为合理缺省，待实机深浅主题对比度校验后固化（design.md §3）。
+ * 速度色阶锚点（tok/s → 颜色），分段线性插值，≥500 封顶为紫。
+ * 语义：0 极慢（红）→ 150 正常（绿）→ 300 快（蓝）→ 500 极快（紫）。
+ * 域取实机会话速度分布：常见几十~几百 tok/s，原 2000 档位的蓝→紫段形同虚设，
+ * 按需求把极快档压缩到 500 封顶。锚点色值为合理缺省，待实机深浅主题对比度校验后固化。
  */
 const SPEED_ANCHORS = Object.freeze([
-  Object.freeze({ v: 0, c: '#e5484d' }),    // 红：极慢
-  Object.freeze({ v: 150, c: '#46a758' }),  // 绿：正常
-  Object.freeze({ v: 800, c: '#0090ff' }),  // 蓝：快
-  Object.freeze({ v: 2000, c: '#8e4ec6' }), // 紫：极快（≥2000 封顶）
+  Object.freeze({ v: 0, c: '#e5484d' }),   // 红：极慢
+  Object.freeze({ v: 150, c: '#46a758' }), // 绿：正常
+  Object.freeze({ v: 300, c: '#0090ff' }), // 蓝：快
+  Object.freeze({ v: 500, c: '#8e4ec6' }), // 紫：极快（≥500 封顶）
 ]);
 
 /**
@@ -201,7 +202,7 @@ const CONTEXT_STOPS = compileStops(CONTEXT_ANCHORS, 'p', 'CONTEXT_ANCHORS');
 
 /**
  * 速度色阶：tok/s → 颜色（hex）。
- * 0 红 → 150 绿 → 800 蓝 → ≥2000 紫（封顶）；hsl 分段线性插值，域外钳制封顶。
+ * 0 红 → 150 绿 → 300 蓝 → ≥500 紫（封顶）；hsl 分段线性插值，域外钳制封顶。
  * 无效输入（NaN/±Infinity/负数/非 number）返回中性灰（见顶部偏差记录 1）。
  * @param {number} tokPerSec 每秒输出 token 数
  * @returns {string} 6 位小写 hex 颜色
