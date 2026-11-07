@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/11-06-statusbar-design/prd.md", "reason": "验收标准 AC1–AC10 与 Out of Scope 是检查的基准"}
+{"file": ".trellis/tasks/11-06-statusbar-design/design.md", "reason": "卸载闭环三缺口、降级策略、色阶锚点等设计约束的核对依据"}
+{"file": "docs/adr/0001-asar-injection-full-route.md", "reason": "检查实现是否履行 ADR 义务（restore 挂接、ZIP 撤销链、失败保留运行目录）"}
+{"file": "CONTEXT.md", "reason": "检查文案与术语是否符合词汇表（估算值标识、tok/s 标签、圆环增强语义）"}

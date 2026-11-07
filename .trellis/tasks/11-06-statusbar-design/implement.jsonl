@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/11-06-statusbar-design/research/zcode-token-usage-statusbar.md", "reason": "接入内核、安装卸载机制、统计口径的复刻来源与裁剪依据"}
+{"file": ".trellis/tasks/11-06-statusbar-design/research/deepseek-harness-statusbar.md", "reason": "状态条视觉规格（布局/字号/hover/防跳动）与去文字化做法的参考依据"}
+{"file": ".trellis/tasks/11-06-statusbar-design/research/zcode-official-context.md", "reason": "官方 mono 字体栈、--text-ui-sm、foreground-subtle、上下文数据口径与插件变量桥接"}
+{"file": "docs/adr/0001-asar-injection-full-route.md", "reason": "接入方式决策及其义务（卸载三缺口必须补齐）"}
+{"file": "CONTEXT.md", "reason": "领域词汇表：状态条/生成速度/上下文占用/色阶/估算值/圆环增强/会话均"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范入口（bootstrap 进行中，实现前复核是否有新增规范）"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范入口（SQLite 查询/Python 部分适用，实现前复核）"}
