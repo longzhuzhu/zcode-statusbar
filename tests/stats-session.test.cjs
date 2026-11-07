@@ -276,3 +276,159 @@ test('tools：工具名缺失（model 空串或 undefined）归 "" 聚合，tota
   assert.equal(agg.tools.list[0].count, 2);
   assert.equal(agg.tools.list[0].durationMs, 300);
 });
+
+// ---- subagent.list：面板条目（运行中来自投影行，token 来自 model 行）----
+
+function subRow(over) {
+  return Object.assign(
+    {
+      id: 'call_1',
+      sid: 'sess_parent',
+      parentSid: 'sess_parent',
+      kind: 'subagent',
+      isSubagent: true,
+      model: '',
+      subagentType: 'Explore',
+      task: '调研布局',
+      status: 'running',
+      thinking: false,
+      startedAt: 5000,
+      firstTokenAt: null,
+      completedAt: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      childSessionId: null,
+    },
+    over
+  );
+}
+
+test('subagent.list：运行中条目来自 kind=subagent 投影行，token 为 0 且 tpsAvg 为 null', () => {
+  const agg = aggregate([subRow()], 8000);
+  const list = agg.subagent.list;
+  assert.equal(list.length, 1);
+  assert.equal(list[0].status, 'running');
+  assert.equal(list[0].type, 'Explore');
+  assert.equal(list[0].task, '调研布局');
+  assert.equal(list[0].outputTokens, 0);
+  assert.equal(list[0].tpsAvg, null); // 运行中不虚构速度
+  assert.equal(list[0].durationMs, 3000); // now - startedAt
+  assert.equal(agg.subagent.activeCount, 1);
+});
+
+test('subagent.list：已完成条目按 childSessionId 合并 model 行，token 求和且速度非空', () => {
+  const rows = [
+    subRow({ id: 'call_9', status: 'completed', startedAt: 1000, completedAt: 4000, childSessionId: 'sess_sub_a' }),
+    row({ id: 'm1', isSubagent: true, sid: 'sess_sub_a', status: 'completed', startedAt: 1000, firstTokenAt: 2000, completedAt: 4000, outputTokens: 300, inputTokens: 50 }),
+    row({ id: 'm2', isSubagent: true, sid: 'sess_sub_a', status: 'completed', startedAt: 1000, firstTokenAt: 2000, completedAt: 4000, outputTokens: 700, inputTokens: 50 }),
+  ];
+  const agg = aggregate(rows, 10_000);
+  assert.equal(agg.subagent.list.length, 1); // 合并成一条，不是三条
+  const it = agg.subagent.list[0];
+  assert.equal(it.status, 'completed');
+  assert.equal(it.type, 'Explore');
+  assert.equal(it.outputTokens, 1000);
+  assert.equal(it.inputTokens, 100);
+  assert.equal(it.requests, 2);
+  assert.equal(it.durationMs, 3000);
+  assert.ok(it.tpsAvg > 0);
+  assert.equal(agg.subagent.activeCount, 0);
+});
+
+test('subagent.list：多个运行中按 startedAt 升序，已结束按 endedAt 倒序，运行中排在前面', () => {
+  const running =[
+    subRow({ id: 'r1', startedAt: 5000 }),
+    subRow({ id: 'r2', startedAt: 3000 }),
+  ];
+  const done = [
+    subRow({ id: 'd1', status: 'completed', startedAt: 0, completedAt: 1000 }),
+    subRow({ id: 'd2', status: 'completed', startedAt: 0, completedAt: 9000 }),
+  ];
+  const list = aggregate(running.concat(done), 10_000).subagent.list;
+  assert.deepEqual(list.map((i) => i.toolCallId), ['r2', 'r1', 'd2', 'd1']);
+});
+
+test('subagent.list：token 为零的投影行不进主口径（totalTokens/turns/steps 不受影响）', () => {
+  const base = [row({ id: 'main', kind: 'model', status: 'completed', outputTokens: 500, inputTokens: 200 })];
+  const withSub = base.concat([
+    subRow({ id: 'p1', status: 'completed', startedAt: 1000, completedAt: 4000 }),
+    subRow({ id: 'p2' }),
+  ]);
+  const a = aggregate(base, 10_000);
+  const b = aggregate(withSub, 10_000);
+  assert.equal(b.totalTokens, a.totalTokens);
+  assert.equal(b.turns, a.turns);
+  assert.equal(b.steps, a.steps);
+  assert.equal(b.sessionAvgTokPerSec, a.sessionAvgTokPerSec);
+  assert.equal(b.cacheHitRate, a.cacheHitRate);
+  assert.equal(b.subagent.sessionTokens, 0); // 投影行零 token 不污染会话累计
+});
+
+test('subagent.list：对不上投影行的 model 行独立成条，不与其他子代理合并', () => {
+  const agg = aggregate(
+    [
+      subRow({ id: 'p1', childSessionId: 'sess_sub_a', status: 'running' }),
+      row({ id: 'm1', isSubagent: true, sid: 'sess_sub_b', status: 'completed', outputTokens: 42 }),
+    ],
+    10_000
+  );
+  assert.equal(agg.subagent.list.length, 2);
+  const b = agg.subagent.list.find((i) => i.childSessionId === 'sess_sub_b');
+  assert.ok(b);
+  assert.equal(b.outputTokens, 42);
+  assert.equal(b.task, null); // 无投影行就没有任务名，不猜
+});
+
+test('subagent.list：空输入返回空数组', () => {
+  assert.deepEqual(aggregate([]).subagent.list, []);
+  assert.deepEqual(aggregate([row()]).subagent.list, []);
+});
+
+test('subagent.list：未知状态归一为 completed（不虚报运行中）', () => {
+  const list = aggregate([subRow({ id: 'x', status: 'weird' })], 10_000).subagent.list;
+  assert.equal(list[0].status, 'completed');
+});
+
+test('轮次口径 = 用户输入轮数：同 turnId 的多次模型请求只计一轮', () => {
+  // 一轮工具循环：用户提问 → 模型请求 → 工具 → 模型请求 → ... 共享同一 turn_id
+  const agg = aggregate([
+    row({ id: 'a', turnId: 't1', outputTokens: 100 }),
+    row({ id: 'b', turnId: 't1', outputTokens: 100 }),
+    row({ id: 'c', turnId: 't1', outputTokens: 100 }),
+    row({ id: 'd', turnId: 't2', outputTokens: 100 }),
+  ]);
+  assert.equal(agg.turns, 2, '3 次模型请求同属 t1 + 1 次 t2 = 2 个用户输入轮');
+  // 步数仍按工具调用计，与轮次口径互相独立
+  assert.equal(agg.steps, 0);
+});
+
+test('轮次兜底：turnId 缺失的行各计一轮（旧库/瘦身夹具不丢轮次）', () => {
+  const agg = aggregate([
+    row({ id: 'a', turnId: 't1' }),
+    row({ id: 'b' }), // 缺 turnId
+    row({ id: 'c', turnId: null }),
+    row({ id: 'd', turnId: '' }),
+  ]);
+  // t1 一轮 + 三个无 turnId 行各一轮
+  assert.equal(agg.turns, 4);
+});
+
+test('轮次只数已完成轮：running/error 行不进 turns', () => {
+  const agg = aggregate([
+    row({ id: 'a', turnId: 't1' }),
+    row({ id: 'b', turnId: 't1', status: 'running' }),
+    row({ id: 'c', turnId: 't2', status: 'error' }),
+  ]);
+  assert.equal(agg.turns, 1, '只有 t1 有 completed 行，t2 仅 error 不计');
+});
+
+test('轮次不含子代理：子代理行的 turnId 不参与主口径', () => {
+  const agg = aggregate([
+    row({ id: 'a', turnId: 't1' }),
+    row({ id: 's', turnId: 't1', isSubagent: true }),
+    row({ id: 's2', turnId: 't9', isSubagent: true }),
+  ]);
+  assert.equal(agg.turns, 1, '子代理 turnId 一律不计');
+});

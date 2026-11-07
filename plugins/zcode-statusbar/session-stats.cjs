@@ -21,6 +21,8 @@
  * 2. 返回值在契约四字段（sessionAvgTokPerSec / cacheHitRate / totalTokens / subagent）之外扩展：
  *    turns、steps、tokens 分项、timing、speedTrend、subagent.rows，
  *    供 R1 常驻控件（轮次·步数）与 R6 详情弹层（模型/工具用时、TTFT、速度趋势、子代理明细）使用。
+ *    turns 口径为「用户输入轮数」：按行 turnId 去重（一轮工具循环有多次模型请求）；
+ *    turnId 缺失的行各计一轮兜底。
  * 3. speedTrend 元素为 { t, tokPerSec }（t = 该轮 completedAt），最多保留最近 10 轮。
  * 4. 行 status 严格判定：仅 status === 'completed' 计入完成态；未知状态一律忽略（宁可少算不可串数）。
  * 5. 返回值再扩展顶层 tools 明细分组 { total, errors, list: [{ name, count, durationMs, errors }] }：
@@ -47,6 +49,25 @@ function num(v) {
 /** 是否子代理行（R5：子代理不计入主口径） */
 function isSubagent(row) {
   return !!(row && row.isSubagent === true);
+}
+
+/**
+ * 用户输入轮数：按 turnId 去重计数（独立小函数，便于单测）。
+ * 一轮的工具循环会产生多次模型请求，都共享同一 turn_id——直接数行数会把 1 轮数成 N 轮。
+ * turnId 缺失（旧库缺列/瘦身夹具）的行各自按独立一轮计：宁可多算，不把真实轮次算丢。
+ */
+function countTurns(rows) {
+  const seen = new Set();
+  let n = 0;
+  for (const r of rows) {
+    const tid = r ? r.turnId : null;
+    if (typeof tid === 'string' && tid) {
+      if (seen.has(tid)) continue;
+      seen.add(tid);
+    }
+    n += 1;
+  }
+  return n;
 }
 
 /**
@@ -97,6 +118,112 @@ function sumBy(list, key) {
 }
 
 /**
+ * 子代理面板条目列表（CONTRACT §4.2 subagent.list）。
+ *
+ * 两个来源合并成一种形状：
+ * - kind='subagent' 的投影行：存在性与任务名。运行中的子代理只在这里有记录，
+ *   因为宿主在子代理跑完之前不写 model_usage。
+ * - kind='model' 且 isSubagent 的行：token 与速度，带 sid = 子会话 id。
+ *
+ * 关联键用 childSessionId。对不上任何 kind='subagent' 行的 model 行独立成条——
+ * 宁可多一行，也不把两个子代理的数据混作一个。
+ *
+ * @param {Array<object>} rows 全部请求行（含主会话行，逐行过滤）
+ * @param {number} now 当前时间（ms），用于运行中条目的实时耗时
+ */
+function buildSubagentList(rows, now) {
+  const byChild = new Map(); // childSessionId → 条目
+  const items = [];
+
+  function blank(key, child, callId) {
+    return {
+      key: key,
+      toolCallId: callId || null,
+      childSessionId: child || null,
+      type: null,
+      task: null,
+      status: 'completed',
+      startedAt: null,
+      endedAt: null,
+      durationMs: null,
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      tpsAvg: null,
+    };
+  }
+
+  // 第一遍：投影行给出存在性、任务名、状态
+  for (const r of rows) {
+    if (!r || typeof r !== 'object' || r.kind !== 'subagent') continue;
+    const child = typeof r.childSessionId === 'string' ? r.childSessionId : null;
+    const callId = r.id != null ? String(r.id) : null;
+    const item = blank(child || callId || '', child, callId);
+    item.type = typeof r.subagentType === 'string' && r.subagentType ? r.subagentType : null;
+    item.task = typeof r.task === 'string' && r.task ? r.task : null;
+    item.status = normalizeSubStatus(r.status);
+    item.startedAt = num(r.startedAt);
+    item.endedAt = item.status === 'running' ? null : num(r.completedAt);
+    if (child) byChild.set(child, item);
+    items.push(item);
+  }
+
+  // 第二遍：model 行回填 token / 请求数 / 速度窗口
+  let outSum = 0;
+  let secSum = 0;
+  for (const r of rows) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.kind === 'subagent' || !isSubagent(r)) continue;
+    const child = typeof r.sid === 'string' ? r.sid : null;
+    let target = child ? byChild.get(child) : null;
+    if (!target) {
+      target = blank(child || '', child, null);
+      target.status = normalizeSubStatus(r.status);
+      if (child) byChild.set(child, target);
+      items.push(target);
+    }
+    if (r.status === 'completed') target.requests += 1;
+    target.inputTokens += num(r.inputTokens) || 0;
+    target.outputTokens += num(r.outputTokens) || 0;
+    target.cacheReadTokens += num(r.cacheReadTokens) || 0;
+    target.cacheWriteTokens += num(r.cacheWriteTokens) || 0;
+    const s = num(r.startedAt);
+    if (s != null && (target.startedAt == null || s < target.startedAt)) target.startedAt = s;
+    const e = num(r.completedAt);
+    if (e != null && (target.endedAt == null || e > target.endedAt)) target.endedAt = e;
+    const win = rowWindowMs(r);
+    if (isCountedWindow(win)) {
+      outSum += num(r.outputTokens) || 0;
+      secSum += win / 1000;
+    }
+  }
+
+  const list = items.slice(-SUBAGENT_DETAIL_MAX);
+  for (const it of list) {
+    const end = it.status === 'running' ? now : it.endedAt;
+    it.durationMs = it.startedAt != null && end != null && end >= it.startedAt ? end - it.startedAt : null;
+    // 已完成条目的平均速度：会话级加权（口径同主会话），运行中不虚构
+    if (it.status !== 'running' && secSum > 0) it.tpsAvg = outSum / secSum;
+  }
+
+  const running = list.filter(function (it) { return it.status === 'running'; });
+  running.sort(function (a, b) { return (a.startedAt || 0) - (b.startedAt || 0); });
+  const done = list.filter(function (it) { return it.status !== 'running'; });
+  done.sort(function (a, b) { return (b.endedAt || a.startedAt || 0) - (a.endedAt || b.startedAt || 0); });
+  return running.concat(done);
+}
+
+/** 子代理状态归一：未知值一律按已完成处理（宁可少报运行中，不虚报活跃） */
+function normalizeSubStatus(s) {
+  if (s === 'running') return 'running';
+  if (s === 'error') return 'error';
+  if (s === 'cancelled') return 'cancelled';
+  return 'completed';
+}
+
+/**
  * 聚合主入口。
  * @param {Array<object>} rows 请求行数组（形状见 CONTRACT.md；容忍坏行，逐行跳过）
  * @param {number} [now] 当前时间（ms），仅用于子代理活跃速度；缺省 Date.now()
@@ -106,12 +233,15 @@ function aggregate(rows, now) {
   if (num(now) == null) now = Date.now();
 
   // 行分类：主会话完成请求 / 主会话完成工具调用 / 子代理行
+  // kind='subagent' 的行零 token，只承载存在性与状态（见 buildSubagentList），
+  // 不得进 subRows，否则会话累计 token 与活跃速度会被这些零值行污染。
   const mainCompleted = [];
   const toolCompleted = [];
   const toolEnded = [];
   const subRows = [];
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
+    if (row.kind === 'subagent') continue;
     if (isSubagent(row)) {
       subRows.push(row);
       continue;
@@ -199,7 +329,10 @@ function aggregate(rows, now) {
   );
 
   // ---- 子代理聚合（R5 双态）----
-  let activeCount = 0;
+  // 面板条目先建，activeCount 取两者中更可信的来源：投影行是运行中子代理的唯一
+  // 存在性证据（宿主跑完才写 model_usage），model 行则提供 token。
+  const subList = buildSubagentList(rows, now);
+  let activeCount = subList.filter(function (it) { return it.status === 'running'; }).length;
   let activeOut = 0;
   let activeSec = 0;
   let subSessionTokens = 0;
@@ -208,7 +341,7 @@ function aggregate(rows, now) {
     const outTok = num(r.outputTokens);
     subSessionTokens += (inTok != null ? inTok : 0) + (outTok != null ? outTok : 0);
     if (r.status !== 'running') continue;
-    activeCount += 1;
+    // activeCount 已按面板条目算过：这里的 model 行只补速度窗口，不重复计数
     // 活跃速度窗口：now −（首字时间优先，缺则 started_at）；与主口径同用 200ms 下限滤抖动
     const start = num(r.startedAt);
     const first = num(r.firstTokenAt);
@@ -221,8 +354,8 @@ function aggregate(rows, now) {
   }
 
   return {
-    // R1 Activity：轮次 = 主会话完成请求数；步数 = 主会话完成工具调用数
-    turns: mainCompleted.length,
+    // R1 Activity：轮次 = 用户输入轮数（按 turnId 去重）；步数 = 主会话完成工具调用数
+    turns: countTurns(mainCompleted),
     steps: toolCompleted.length,
     // R2 完成态口径（核实值；null = 无有效窗口）
     sessionAvgTokPerSec,
@@ -243,6 +376,7 @@ function aggregate(rows, now) {
           outputTokens: num(r.outputTokens) != null ? num(r.outputTokens) : 0,
         };
       }),
+      list: subList,
     },
     tools: { total: toolTotal, errors: toolErrorTotal, list: toolsList },
   };
@@ -250,11 +384,13 @@ function aggregate(rows, now) {
 
 module.exports = {
   aggregate,
+  buildSubagentList,
   // 口径小函数（测试与内核对齐用）
   windowBasis,
   rowWindowMs,
   isCountedWindow,
   isSubagent,
+  countTurns,
   // 常量
   MIN_WINDOW_MS,
   MAX_WINDOW_MS,

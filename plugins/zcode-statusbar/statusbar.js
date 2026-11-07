@@ -60,6 +60,24 @@
   // 按数据属性本身定位而非 testid：testid 改名时属性仍在。官方升级若整块移除 → 读不到 → pill 不渲染。
   var USAGE_SELECTOR = '[data-usage-used]';
 
+  // 上下文来源分桶：宿主 usage.contextWindow.breakdown 的七个 source 归三桶。
+  // 配色对齐 deepseek ContextMeter（中性灰 / 紫 / 蓝），深浅主题值由 applyThemeVars 写入。
+  var CTX_BUCKETS = [
+    { key: 'system', label: 'ctxSystem', color: 'var(--zsb-ctx-system,#adb2b8)' },
+    { key: 'tools', label: 'ctxTools', color: 'var(--zsb-ctx-tools,#a78bfa)' },
+    { key: 'messages', label: 'ctxMessages', color: 'var(--zsb-ctx-messages,#4d93f8)' },
+  ];
+  // source → 桶引用（表驱动：新增 source 只改这里，contextShares 不分支）
+  var CTX_BUCKET_OF = {
+    system_prompt: CTX_BUCKETS[0],
+    meta_user_context: CTX_BUCKETS[0],
+    skills: CTX_BUCKETS[0],
+    tool_prompt: CTX_BUCKETS[1],
+    system_tool_schemas: CTX_BUCKETS[1],
+    mcp_tool_schemas: CTX_BUCKETS[1],
+    messages: CTX_BUCKETS[2],
+  };
+
   // 事件名（与 CONTRACT.md 严格同步）
   var EV = {
     TURN: 'zcode-statusbar:turn',
@@ -90,7 +108,7 @@
     modelTime: '模型用时',
     toolTime: '工具用时',
     ttft: '首字延迟',
-    trend: '最近速度趋势',
+    trend: '速度趋势',
     tps: '输出速度（TPS）',
     inputTok: '输入',
     outputTok: '输出',
@@ -104,6 +122,10 @@
     ctxUsed: '已用',
     ctxTotal: '总量',
     ctxPercent: '占比',
+    ctxHeadline: '上下文已用',
+    ctxSystem: '系统提示词',
+    ctxTools: '工具定义',
+    ctxMessages: '对话消息',
     menuShow: '显示',
     pillActivity: '活动',
     pillUsage: '用量',
@@ -137,6 +159,7 @@
     session: null, // session-stats.cjs aggregate() 输出
     sessionAt: 0, // 最近一次 session 数据到达时间（诊断用）
     context: null, // { used, size } 上下文占用（读宿主隐藏锚点，诊断用）
+    breakdown: null, // [{ source, chars }] 上下文来源明细（弹层打开时读一次，见 readContextBreakdown）
     lastError: null,
     visible: { activity: true, usage: true, context: true, subagent: true, gear: true },
   };
@@ -175,17 +198,30 @@
     return n;
   }
 
+  // 紧凑 token 数：≥100 的缩放值取整（262K 而非 262.0K，去掉假精度），
+  // 小数只在量级小时有意义（11.4K）。与 deepseek ContextMeter 的 formatTokens 同口径。
+  function fmtScaled(v) {
+    return v >= 100 ? String(Math.round(v)) : (Math.round(v * 10) / 10).toFixed(1);
+  }
+
   function fmtTok(n) {
     if (typeof n !== 'number' || !isFinite(n)) return '--';
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    if (n >= 1e9) return fmtScaled(n / 1e9) + 'B';
+    if (n >= 1e6) return fmtScaled(n / 1e6) + 'M';
+    if (n >= 1000) return fmtScaled(n / 1000) + 'K';
     return String(Math.round(n));
   }
 
   function fmtPct(rate) {
     if (typeof rate !== 'number' || !isFinite(rate)) return '--';
     return Math.round(rate * 100) + '%';
+  }
+
+  // 来源占比：≥10% 取整（避免长条上的抖动），小份额保留一位小数（0.4% 不吃成 0%）
+  function fmtShare(rate) {
+    if (typeof rate !== 'number' || !isFinite(rate)) return '--';
+    var p = rate * 100;
+    return (p >= 10 ? String(Math.round(p)) : (Math.round(p * 10) / 10).toFixed(1)) + '%';
   }
 
   function fmtMsNum(ms) {
@@ -213,14 +249,40 @@
   var CSS = [
     // 基色 fallback：deepseek 静态三级灰（浅 rgb(129,133,140) / 深 rgb(173,178,184)），
     // 经 --zsb-subtle 由 applyThemeVars 按主题提供；宿主变量可用时优先宿主。
-    '.zsb-bar{position:relative;display:flex;justify-content:center;align-items:center;gap:12px;',
-    'min-height:22px;margin-top:4px;font-family:var(--zcode-font-mono,' + JSON.stringify(DEFAULT_MONO) + ');',
+    // 单行铁律：bar 与 pill 一律 nowrap 且 pill 不可收缩（flex:none）。容器收窄时不再换行，
+    // 改由 fitBar 的降级阶梯（fit=1..7，见下方 data-fit 规则）逐档让位。
+    // safe center：极窄时退化为左对齐，读数从头可见，而不是两端各裁一半。
+    // 底部留白回收：宿主 dock 内容列自带 pb-4(16px)、桌面面板 pb-1(4px)，状态条插在
+    // [data-v4-composer] 之后时这段 20px 会变成条下方的死区（红框实测）。负 margin 把条
+    // 下沉占住该留白，读数贴近窗口底；--zsb-sink 由 mountBar 实测宿主留白后写入，缺省 20px。
+    '.zsb-bar{position:relative;display:flex;justify-content:center;justify-content:safe center;',
+    'align-items:center;gap:12px;',
+    'min-height:22px;margin-top:4px;margin-bottom:calc(-1 * var(--zsb-sink,20px));',
+    'font-family:var(--zcode-font-mono,' + JSON.stringify(DEFAULT_MONO) + ');',
     'font-size:var(--zcode-font-text-sm-size,12px);font-weight:400;line-height:20px;',
     'color:var(--zcode-color-text-secondary,var(--zsb-subtle,#818a8c));',
-    'font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none;z-index:60;}',
+    'font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none;z-index:60;',
+    'white-space:nowrap;}',
     '.zsb-pill{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:8px;',
     'border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;',
-    'font-variant-numeric:tabular-nums;transition:background-color .15s ease,color .15s ease;}',
+    'font-variant-numeric:tabular-nums;transition:background-color .15s ease,color .15s ease;',
+    'flex:none;white-space:nowrap;}',
+    // 窄容器降级阶梯：data-fit 为空格分隔的档位集合（"1 2"=已启用前两档），由 fitBar 按
+    // 实测可用宽度逐档抬高（不是媒体查询——状态条容器宽度与窗口宽度无关）。
+    // 价值序（先让位的是最可牺牲的）：缓存命中（派生指标，长期稳定） < 闲置子代理统计
+    // < 轮·步读数 < 用量总量 < 运行中子代理 < 速度单位 < 上下文百分比。
+    // 上下文圆环与齿轮任何档位都不隐（R4）；读数在各弹层内始终完整可查。
+    // 用量 pill 一旦隐就整只隐（不留孤立图标——脱离了数字的图标读不出语义，只是噪音）。
+    '.zsb-bar[data-fit~="1"] .zsb-f1,', // 缓存命中（Usage 弹层内仍有）
+    '.zsb-bar[data-fit~="2"]:not([data-sub="run"]) [data-zsb-pill="subagent"],', // 闲置子代理（非运行态）
+    '.zsb-bar[data-fit~="3"] .zsb-f3,', // 轮·步读数（Activity 弹层内仍有）
+    '.zsb-bar[data-fit~="4"] [data-zsb-pill="usage"],', // 用量 pill 整只（Usage 弹层内仍有）
+    '.zsb-bar[data-fit~="5"] [data-zsb-pill="subagent"],', // 运行中子代理
+    '.zsb-bar[data-fit~="6"] .zsb-f6,', // 速度单位 tok/s
+    '.zsb-bar[data-fit~="7"] .zsb-f7{display:none;}', // 上下文百分比（圆环本身仍显示占比）
+    // 进入降级后顺手收紧间距：gap 12px→8px、pill 内边距 8px→6px，约再省 40px
+    '.zsb-bar[data-fit~="1"]{gap:8px;}',
+    '.zsb-bar[data-fit~="1"] .zsb-pill{padding:1px 6px;}',
     // hover：淡灰背景 + 升为二级文字色（fallback 同样按主题经 --zsb-hover 提供）
     '.zsb-pill:hover{background:color-mix(in srgb,currentColor 10%,transparent);',
     'color:var(--zcode-color-text-secondary-hover,var(--zsb-hover,#565a60));}',
@@ -230,12 +292,27 @@
     '.zsb-est{animation:zsb-breathe 2s ease-in-out infinite;}',
     '@keyframes zsb-breathe{0%,100%{opacity:1}50%{opacity:.55}}',
     '.zsb-ring-fill{transition:stroke-dasharray .3s ease,stroke .3s ease;}',
-    '.zsb-ctxbar{height:4px;border-radius:999px;margin-top:10px;overflow:hidden;',
+    '.zsb-ctxbar{height:4px;border-radius:999px;margin-top:10px;overflow:hidden;display:flex;gap:1px;',
     'background:color-mix(in srgb,currentColor 16%,transparent);}',
     '.zsb-ctxbar-fill{display:block;height:100%;border-radius:999px;',
     'background:currentColor;transition:width .3s ease;}',
-    '.zsb-pop{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);',
-    'min-width:220px;max-width:340px;padding:12px 14px;border-radius:12px;',
+    '.zsb-ctxseg{display:block;height:100%;flex:none;min-width:2px;transition:width .3s ease;}',
+    // 头部：读数与总量同时可见，读数为强调色、其余为弱化色（对齐 deepseek header 层级）
+    '.zsb-ctx-head{display:flex;align-items:baseline;gap:6px;line-height:22px;}',
+    '.zsb-ctx-headline{opacity:.7;}',
+    '.zsb-ctx-percent{font-weight:500;}',
+    '.zsb-ctx-figures{margin-left:auto;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap;}',
+    '.zsb-ctxlist{margin-top:8px;}',
+    '.zsb-ctxrow{display:flex;align-items:center;gap:6px;line-height:22px;}',
+    '.zsb-ctxrow .k{opacity:.85;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.zsb-ctxrow .v{margin-left:auto;font-variant-numeric:tabular-nums;}',
+    '.zsb-ctxsw{width:8px;height:8px;border-radius:2px;flex:none;}',
+    // 宽度对齐 deepseek 弹层：标签与读数之间留足呼吸，趋势图可横向铺开更多采样点。
+    // bottom 里加上 --zsb-sink：条自身被负 margin 下沉了 sink 量，弹层要同量抬回，
+    // 否则弹层会被压到条上、下沿被裁。
+    '.zsb-pop{position:absolute;bottom:calc(100% + 10px + var(--zsb-sink,20px));left:50%;',
+    'transform:translateX(-50%);',
+    'min-width:280px;max-width:360px;padding:12px 14px;border-radius:12px;',
     'background:var(--zsb-pop-bg,var(--zsb-pop-bg-fallback,#fff));border:1px solid var(--zsb-pop-border,rgba(0,0,0,.12));',
     'box-shadow:0 8px 28px rgba(0,0,0,.18);color:var(--zcode-color-text-primary,var(--zsb-primary,#232629));',
     'font-variant-numeric:tabular-nums;text-align:left;z-index:70;}',
@@ -244,7 +321,7 @@
     '.zsb-row{display:flex;justify-content:space-between;gap:16px;line-height:22px;}',
     '.zsb-row .k{opacity:.85;white-space:nowrap;}',
     '.zsb-row .v{white-space:nowrap;}',
-    // 工具名行截断：长工具名（如 MCP 全名）不撑破 max-width:340px 的弹层（.k 默认 nowrap 不截断）
+    // 工具名行截断：长工具名（如 MCP 全名）不撑破 max-width:360px 的弹层（.k 默认 nowrap 不截断）
     '.zsb-row .zsb-tool-k{min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.zsb-sec{margin-top:10px;}',
     // 速度趋势折线图：SVG 按容器像素宽定点绘制，文字/网格线经类名统一弱化着色
@@ -263,7 +340,7 @@
     '.zsb-mi:hover{background:color-mix(in srgb,currentColor 10%,transparent);}',
     '.zsb-mi .tick{opacity:.9;}',
     '.zsb-mi.danger:hover{background:color-mix(in srgb,#e5484d 14%,transparent);}',
-    '.zsb-menu-ver{opacity:.6;line-height:22px;padding:0 4px;}',
+    '.zsb-menu-ver{opacity:.55;line-height:20px;padding:0 4px;text-align:right;}',
     '.zsb-hr{border:0;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent);margin:6px 0;}',
   ].join('');
 
@@ -306,6 +383,10 @@
     root.style.setProperty('--zsb-primary', dark ? '#e6e8eb' : '#232629');
     root.style.setProperty('--zsb-pop-bg-fallback', dark ? '#1e1f22' : '#ffffff');
     root.style.setProperty('--zsb-pop-border', dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.12)');
+    // 上下文来源配色：系统提示词跟主题灰走（深色下提亮），工具/消息用固定紫蓝（deepseek 同款）
+    root.style.setProperty('--zsb-ctx-system', dark ? 'rgb(173,178,184)' : 'rgb(129,133,140)');
+    root.style.setProperty('--zsb-ctx-tools', '#a78bfa');
+    root.style.setProperty('--zsb-ctx-messages', dark ? 'rgb(77,147,248)' : 'rgb(59,130,246)');
   }
 
   // ================= 图标（内联 SVG，14×14，描边继承 currentColor） =================
@@ -342,6 +423,7 @@
   var ui = null; // mountBar 返回的控件引用集：{ bar, pop, pills:{activity,usage,context,subagent,gear}, activityLabel, speedNum, usageNum, cacheNum, ctxPct, ctxFill, subLabel, subSep, subSpeed }
   var popMode = null; // 'activity' | 'usage' | 'context' | 'menu' | null
   var pendingTrend = null; // 待定点绘制的趋势样本：弹层 hidden 期间无像素宽，解除隐藏后 layoutTrend 消费
+  var resizeObserver = null; // 容器宽度监听（watchResize 建立，随 bar 生命周期）
 
   function makePill(name, icon, title) {
     var p = el('button', 'zsb-pill');
@@ -356,6 +438,34 @@
     return p;
   }
 
+  // 条下方宿主留白上限：dock pb-4 + 面板 pb-1 合计 20px；超过视为布局异常（如 draft 推荐槽），
+  // 不做下沉——宁可露白也不要让读数压到窗口边缘之外。
+  var SINK_MAX_PX = 24;
+
+  // 实测状态条底边到 dock 内容列（或面板）底边之间的空白，作为下沉量。
+  // 只用 getBoundingClientRect 读一次几何，不写宿主任何属性；异常/读不到即放弃。
+  function sinkIntoDockGap(bar) {
+    try {
+      var dock = bar.parentElement;
+      if (!dock || typeof dock.getBoundingClientRect !== 'function') return;
+      // 沿祖先上溯，取第一个带底部内边距的 dock 容器（宿主 px-2 pb-4 的内容列）
+      var target = dock;
+      for (var i = 0; i < 3 && target; i++) {
+        var cs = W.getComputedStyle ? W.getComputedStyle(target) : null;
+        var padB = cs ? parseFloat(cs.paddingBottom) : NaN;
+        if (isFinite(padB) && padB > 0) break;
+        target = target.parentElement;
+      }
+      if (!target) return;
+      var cs2 = W.getComputedStyle ? W.getComputedStyle(target) : null;
+      var pad = cs2 ? parseFloat(cs2.paddingBottom) : NaN;
+      if (!isFinite(pad) || pad <= 0 || pad > SINK_MAX_PX) return;
+      bar.style.setProperty('--zsb-sink', pad + 'px');
+    } catch (e) {
+      /* 布局读不到：保留 CSS 缺省下沉量 */
+    }
+  }
+
   function mountBar(anchor) {
     var bar = el('div', 'zsb-bar');
     bar.setAttribute('role', 'status');
@@ -363,25 +473,25 @@
 
     // Activity：轮次·步数·tok/s（速度数字单独成 span：上色阶 + 估算态呼吸）
     var pAct = makePill('activity', ICONS.activity, I18N.verifiedTip);
-    var actLabel = el('span', null, '--轮·--步·');
+    var actLabel = el('span', 'zsb-f3', '--轮·--步·'); // 窄容器让位次序见 CSS 阶梯
     var speedNum = el('span', 'zsb-num', '--');
-    var speedUnit = el('span', null, ' tok/s');
+    var speedUnit = el('span', 'zsb-f6', ' tok/s');
     pAct.appendChild(actLabel);
     pAct.appendChild(speedNum);
     pAct.appendChild(speedUnit);
 
     // Usage：累计 token · 缓存 N%（缓存已含在输入，不重复相加）
     var pUsage = makePill('usage', ICONS.usage, I18N.usageTip);
-    var usageNum = el('span', 'zsb-num', '-- tok');
-    var usageSep = el('span', null, ' · 缓存');
-    var cacheNum = el('span', 'zsb-num', '--');
+    var usageNum = el('span', 'zsb-num zsb-f4', '-- tok');
+    var usageSep = el('span', 'zsb-f1', ' · 缓存');
+    var cacheNum = el('span', 'zsb-num zsb-f1', '--');
     pUsage.appendChild(usageNum);
     pUsage.appendChild(usageSep);
     pUsage.appendChild(cacheNum);
 
     // 上下文：圆环 + 百分比（形态对齐 deepseek ContextMeter）。数据缺失时整 pill 隐藏（见 render）。
     var pCtx = makePill('context', CONTEXT_RING_SVG, I18N.contextTip);
-    var ctxPct = el('span', 'zsb-num', '--');
+    var ctxPct = el('span', 'zsb-num zsb-f7', '--');
     pCtx.appendChild(ctxPct);
     var ctxFill = pCtx.querySelector('.zsb-ring-fill');
 
@@ -416,6 +526,10 @@
     if (anchor.nextSibling) host.insertBefore(bar, anchor.nextSibling);
     else host.appendChild(bar);
 
+    // 实测条下方到底线的宿主留白，写进 --zsb-sink 让条下沉占住（见 .zsb-bar 注释）。
+    // 读不到布局（测试桩/宿主未挂载）时保留 CSS 缺省值，不写脏值。
+    sinkIntoDockGap(bar);
+
     return {
       bar: bar,
       pop: pop,
@@ -447,8 +561,10 @@
     ui.pop.innerHTML = '';
     if (mode === 'activity') buildActivityDetail(ui.pop);
     else if (mode === 'usage') buildUsageDetail(ui.pop);
-    else if (mode === 'context') buildContextDetail(ui.pop);
-    else if (mode === 'menu') buildMenu(ui.pop);
+    else if (mode === 'context') {
+      state.breakdown = readContextBreakdown(); // 仅打开时读一次，不进 1s 渲染循环
+      buildContextDetail(ui.pop);
+    } else if (mode === 'menu') buildMenu(ui.pop);
     else {
       closePop();
       return;
@@ -476,26 +592,88 @@
     return r;
   }
 
-  // 上下文详情：已用 / 总量 + 占用进度条。数据与官方 pill 同源（隐藏锚点），
-  // 分解仅在有 breakdown 时才画分段条——宿主锚点当前不带 breakdown，退化为单色进度条。
+  // 上下文详情（形态对齐 deepseek ContextMeter）：头部一行读数 + 分段占用条 + 来源图例。
+  // 头部数字取自宿主隐藏锚点（提供方精确水位）；分段与图例来自宿主 breakdown，
+  // 读不到时退化为单色进度条且整块图例不渲染（绝不用猜测值凑三行）。
   function buildContextDetail(pop) {
     var c = state.context;
-    sectionTitle(pop, I18N.contextTitle);
     if (!c) {
+      sectionTitle(pop, I18N.contextTitle);
       pop.appendChild(el('div', 'k', I18N.noData));
       return;
     }
     var pct = Math.min(1, Math.max(0, c.used / c.size));
-    pop.appendChild(row(I18N.ctxUsed, fmtTok(c.used)));
-    pop.appendChild(row(I18N.ctxTotal, fmtTok(c.size)));
-    pop.appendChild(row(I18N.ctxPercent, fmtPct(pct)));
+    var shares = contextShares();
+
+    var head = el('div', 'zsb-ctx-head');
+    head.appendChild(el('span', 'zsb-ctx-headline', I18N.ctxHeadline));
+    head.appendChild(el('span', 'zsb-ctx-percent', fmtPct(pct)));
+    head.appendChild(el('span', 'zsb-ctx-figures', fmtTok(c.used) + ' / ' + fmtTok(c.size)));
+    pop.appendChild(head);
+
     var bar = el('div', 'zsb-ctxbar');
-    var fill = el('i', 'zsb-ctxbar-fill');
-    fill.style.width = (pct * 100).toFixed(1) + '%';
-    var ramp = rampApi();
-    fill.style.background = (ramp && ramp.contextColor(pct)) || '';
-    bar.appendChild(fill);
+    if (shares) {
+      // 分段长度 = 总水位 × 该来源份额：条的总长仍是精确值，分项只切分它。
+      shares.forEach(function (s) {
+        var seg = el('i', 'zsb-ctxseg');
+        seg.style.width = (pct * s.share * 100).toFixed(2) + '%';
+        seg.style.background = s.color;
+        bar.appendChild(seg);
+      });
+    } else {
+      var fill = el('i', 'zsb-ctxbar-fill');
+      fill.style.width = (pct * 100).toFixed(1) + '%';
+      var ramp = rampApi();
+      fill.style.background = (ramp && ramp.contextColor(pct)) || '';
+      bar.appendChild(fill);
+    }
     pop.appendChild(bar);
+
+    if (shares) {
+      var list = el('div', 'zsb-ctxlist');
+      shares.forEach(function (s) {
+        var r = el('div', 'zsb-ctxrow');
+        var sw = el('i', 'zsb-ctxsw');
+        sw.style.background = s.color;
+        r.appendChild(sw);
+        r.appendChild(el('span', 'k', s.label));
+        r.appendChild(el('span', 'v', s.sharePct));
+        list.appendChild(r);
+      });
+      pop.appendChild(list);
+    }
+  }
+
+  // 来源分桶：宿主七个 source 归三桶。未知 source 不计入——枚举扩展时比例在已知来源
+  // 内归一，不猜归属（宁可比例偏差，不可错标来源）。
+  function contextShares() {
+    var list = state.breakdown;
+    if (!list || !list.length) return null;
+    var totals = {};
+    var sum = 0;
+    for (var i = 0; i < list.length; i++) {
+      var b = CTX_BUCKET_OF[list[i].source];
+      if (!b) continue;
+      var chars = list[i].chars;
+      if (typeof chars !== 'number' || !isFinite(chars) || chars <= 0) continue;
+      totals[b.key] = (totals[b.key] || 0) + chars;
+      sum += chars;
+    }
+    if (sum <= 0) return null;
+    var out = [];
+    for (var j = 0; j < CTX_BUCKETS.length; j++) {
+      var bucket = CTX_BUCKETS[j];
+      var n = totals[bucket.key] || 0;
+      if (n <= 0) continue;
+      out.push({
+        key: bucket.key,
+        label: I18N[bucket.label],
+        color: bucket.color,
+        share: n / sum,
+        sharePct: fmtShare(n / sum),
+      });
+    }
+    return out.length ? out : null;
   }
 
   // Activity 详情：模型用时 / 工具用时 / TTFT / 输出速度（TPS）/ 最近速度趋势。
@@ -692,12 +870,13 @@
       mi.appendChild(el('span', null, pair[1]));
       menu.appendChild(mi);
     });
-    menu.appendChild(el('div', 'zsb-menu-ver', 'v' + VERSION));
     var un = el('button', 'zsb-mi danger');
     un.type = 'button';
     un.dataset.act = 'uninstall';
     un.appendChild(el('span', null, I18N.menuUninstall));
     menu.appendChild(un);
+    menu.appendChild(el('hr', 'zsb-hr'));
+    menu.appendChild(el('div', 'zsb-menu-ver', 'v' + VERSION));
     pop.appendChild(menu);
   }
 
@@ -808,6 +987,64 @@
     });
   }
 
+  // 自适应降级：容器收窄时按档位隐去次要内容（CSS 见 .zsb-bar[data-fit~="n"]），
+  // 保证状态条永远单行、不折行、不横向溢出。
+  // 溢出判定不用 bar.scrollWidth：弹层 .zsb-pop 是 bar 的绝对定位子节点，
+  // 窄容器下它会外溢，把 scrollWidth 撑大，误判为"读数放不下"。
+  // 改为量首个可见 pill 左缘到末个可见 pill 右缘的跨度——恰等于 pill 总宽 + 实际 gap。
+  var FIT_MAX = 7;
+  var fitLevel = 0;
+  var fitAvail = -1; // 上次自适应时的可用宽度；-1 = 尚未测过
+  var fitSpan = -1; // 上次收敛后的内容跨度（稳态判据）
+
+  function applyFit(level) {
+    if (!ui || !ui.bar || level === fitLevel) return;
+    fitLevel = level;
+    if (level > 0) {
+      var tiers = [];
+      for (var i = 1; i <= level; i++) tiers.push(i);
+      ui.bar.setAttribute('data-fit', tiers.join(' '));
+    } else {
+      ui.bar.removeAttribute('data-fit');
+    }
+  }
+
+  function pillsSpan() {
+    var bar = ui.bar;
+    var first = null;
+    var last = null;
+    for (var i = 0; i < bar.children.length; i++) {
+      var n = bar.children[i];
+      if (!n.dataset || !n.dataset.zsbPill) continue; // 跳过弹层
+      if (!(n.offsetWidth > 0)) continue; // 已被档位或用户开关隐去
+      if (!first) first = n;
+      last = n;
+    }
+    if (!first) return 0;
+    return last.offsetLeft + last.offsetWidth - first.offsetLeft;
+  }
+
+  // 每轮 render 与尺寸变化时调。稳态（宽度与内容跨度都没变）直接返回，零属性写入、零抖动；
+  // 变窄立刻升到刚好放得下；变宽或内容变短（重置统计、子代理收工）才重新收敛。
+  function fitBar() {
+    if (!ui || !ui.bar) return;
+    var avail = ui.bar.clientWidth;
+    if (!avail) return; // 未挂载或宿主隐藏：测不出宽度，保持现状
+    if (avail === fitAvail && pillsSpan() === fitSpan) return;
+    if (avail !== fitAvail) {
+      fitAvail = avail;
+      applyFit(0); // 宽度变了：从头重算，不沿用旧档位
+    }
+    // 升档：溢出就一路升到刚好放下（单调收敛，最多 FIT_MAX 次布局读）；+1 容忍亚像素取整
+    while (fitLevel < FIT_MAX && pillsSpan() > avail + 1) applyFit(fitLevel + 1);
+    // 降档回补：只探一档，探完仍溢出就立刻回滚（原档必不溢出，故稳定不抖）
+    if (fitLevel > 0) {
+      applyFit(fitLevel - 1);
+      if (pillsSpan() > avail + 1) applyFit(fitLevel + 1);
+    }
+    fitSpan = pillsSpan(); // 记录收敛后的跨度，作为下一轮的稳态判据
+  }
+
   // 会话数据规范化：内核 session 事件的 detail 为 { ...zusage 快照, aggregate }（聚合缝
   // 包裹，见 inject-main.cjs handlePayload / CONTRACT.md §7.2）；本 UI 只消费 aggregate
   // 形状（CONTRACT.md §4.2）。非包裹路径（detail 即 aggregate）按特征键识别放行；
@@ -890,6 +1127,13 @@
       ui.subLabel.textContent = fmtTok(sub.sessionTokens || 0);
       ui.pills.subagent.title = I18N.subIdleTip;
     }
+
+    // 降级档位依赖"子代理是否在跑"（运行态比闲置态更值得保留），与数据同轮刷新，
+    // 避免先按旧状态选档、下一轮才改，造成一次可见的跳动。
+    if (ui.bar.dataset.sub !== (subRunning ? 'run' : 'idle')) {
+      ui.bar.dataset.sub = subRunning ? 'run' : 'idle';
+    }
+    fitBar();
   }
 
   // ================= 上下文占用（R4，读宿主隐藏锚点；缺失静默） =================
@@ -916,6 +1160,33 @@
     var ramp = rampApi();
     ui.ctxFill.setAttribute('stroke-dasharray', (RING_C * pct).toFixed(2) + ' ' + RING_C.toFixed(2));
     ui.ctxFill.setAttribute('stroke', (ramp && ramp.contextColor(pct)) || 'currentColor');
+  }
+
+  // 上下文来源明细：走桥的窄投影 getContextBreakdown（只取 used/size/breakdown），
+  // 不碰 getSessionSnapshot——后者是整份会话深拷贝，长会话点一次弹层要拷掉全部消息行。
+  // 旧桥无此方法时退回快照路径，两条路都读不到 → null（退单色条，不猜分项）。
+  function readContextBreakdown() {
+    var bridge = W.__ZCODE_STATUSBAR_BRIDGE__;
+    if (!bridge) return null;
+    if (typeof bridge.getContextBreakdown === 'function') {
+      var r = null;
+      try {
+        r = bridge.getContextBreakdown();
+      } catch (e) {
+        return null;
+      }
+      return r && Array.isArray(r.breakdown) && r.breakdown.length ? r.breakdown : null;
+    }
+    if (typeof bridge.getSessionSnapshot !== 'function') return null;
+    var snap = null;
+    try {
+      snap = bridge.getSessionSnapshot();
+    } catch (e) {
+      return null;
+    }
+    var usage = snap && snap.snapshot && snap.snapshot.usage;
+    var cw = usage && usage.contextWindow;
+    return cw && Array.isArray(cw.breakdown) && cw.breakdown.length ? cw.breakdown : null;
   }
 
   // ================= 身份与挂载 =================
@@ -968,11 +1239,23 @@
 
   function unmountBar() {
     closePop();
+    if (resizeObserver) {
+      try {
+        resizeObserver.disconnect();
+      } catch (e) {
+        /* 已断开：忽略 */
+      }
+      resizeObserver = null;
+    }
     if (ui && ui.bar && ui.bar.parentNode) ui.bar.parentNode.removeChild(ui.bar);
     ui = null;
     mountAnchor = null;
     state.mounted = false;
     state.context = null;
+    state.breakdown = null; // 换会话必须丢弃上一会话的来源明细（防串数）
+    fitLevel = 0; // 新 bar 从最高档位重新自适应
+    fitAvail = -1; // 宽度缓存失效，下次必测
+    fitSpan = -1;
   }
   function attemptMount() {
     var ident = identityOk();
@@ -1021,6 +1304,7 @@
     renderVisibility();
     render();
     bindBarEvents();
+    watchResize();
   }
 
   function startMountLoop() {
@@ -1050,6 +1334,25 @@
       var mi = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
       if (mi && ui.pop.contains(mi)) onMenuAction(mi.dataset.act, mi.dataset.pill);
     });
+  }
+
+  // 容器宽度变化（拖窗口、收窄侧边栏、切分屏）即时重算档位，不等下一次 1s 渲染。
+  // 观察对象是 bar 的父容器而非 bar 本身：bar 宽度由父容器决定，自身尺寸监听在部分宿主里不触发。
+  // 宿主无 ResizeObserver（或测试桩无此全局）时降级为 1s 渲染周期内的 fitBar，功能不缺。
+  function watchResize() {
+    if (resizeObserver || !ui || !ui.bar) return;
+    var RO = W.ResizeObserver;
+    if (typeof RO !== 'function') return;
+    var target = ui.bar.parentElement;
+    if (!target) return;
+    try {
+      resizeObserver = new RO(function () {
+        fitBar();
+      });
+      resizeObserver.observe(target);
+    } catch (e) {
+      resizeObserver = null; // 观察失败：退回周期渲染路径
+    }
   }
 
   // 全局监听只注册一次：turn/session 事件在 bar 未挂载时也要收，挂载后才能立刻出数据。

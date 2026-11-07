@@ -47,7 +47,7 @@ SNAPSHOT_TOP_KEYS = {"local_error", "session", "last_turn", "last", "today",
                      "not_local", "known_sids", "context_window", "context_auto",
                      "code", "ctx_exc", "tools", "recent"}
 
-CONTRACT_ROW_KEYS = {"id", "sid", "kind", "isSubagent", "model", "thinking", "status",
+CONTRACT_ROW_KEYS = {"id", "sid", "turnId", "kind", "isSubagent", "model", "thinking", "status",
                      "startedAt", "firstTokenAt", "completedAt",
                      "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"}
 

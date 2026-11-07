@@ -27,7 +27,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_TURN__` | turn-stats.js | statusbar.js | 最新 turn 样本（§3.1），每次采样整体覆盖 |
 | `__ZCODE_STATUSBAR_TURN_API__` | turn-stats.js | 内核/诊断 | `{ setCharsPerToken(v), calibrateFromTurn({outputTokens, charCount}), reset(), stop() }`（自校准钩子） |
 | `__ZCODE_STATUSBAR_RAMP__` | 加载器（组装自 ramp.js） | statusbar.js | `{ speedColor(tokPerSec), contextColor(pct0to1) }`；缺失 → 数字与上下文圆环退中性灰 |
-| `__ZCODE_STATUSBAR_BRIDGE__` | 内核静态桥 | statusbar.js | `{ getPaneId(): string\|null, getSessionSnapshot(): object\|null }`；身份不可确认两者返回 null |
+| `__ZCODE_STATUSBAR_BRIDGE__` | 内核静态桥 | statusbar.js | `{ getPaneId(): string\|null, getSessionSnapshot(): object\|null, getContextBreakdown(): object\|null }`；身份不可确认时三者返回 null |
 | `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.1.0'`（与 package.json 同步） |
 | `__ZCODE_STATUSBAR_I18N__` | 加载器（可选） | statusbar.js | 文案覆盖对象，键见 statusbar.js 的 I18N 常量（宿主语言覆盖点） |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
@@ -60,7 +60,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 
 ```js
 {
-  turns: number,                  // 轮次 = 主会话完成请求数
+  turns: number,                  // 轮次 = 不同 turnId 的已完成 model 行数（用户输入轮；turnId 缺失按行计）
   steps: number,                  // 步数 = 主会话完成工具调用数（kind==='tool'）
   sessionAvgTokPerSec: number|null, // R2 完成态：Σ输出 ÷ Σ有效时长（null = 无有效窗口）
   cacheHitRate: number|null,      // 0–1；Σcache_read ÷ Σinput（null = input 为 0）
@@ -90,6 +90,8 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 {
   id: string,
   sid: string,                      // 投影来源会话 id（扩展）：内核按窗口焦点会话过滤聚合（R10 防串数）
+  turnId: string|null,              // 用户输入轮标识（扩展）：同一轮工具循环产生的多次模型请求共享一个
+                                    // turn_id；null = 旧库缺列，按「独立一轮」计（宁可多算，不丢轮次）
   kind: 'model' | 'tool',           // 缺省按 'model'
   isSubagent: boolean,              // 缺省 false
   model: string,
@@ -107,6 +109,30 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 
 口径（R2/R5）：有效生成窗 200ms ≤ 窗 < 1h；思考/`model` 含 `claude`（不分大小写）用
 `completed_at − started_at`，其余用 `completed_at − first_token_at`；子代理不计入主口径任何字段。
+
+### 4.4 上下文来源明细（`bridge.getContextBreakdown()` 返回）
+
+上下文弹层的分段条与图例数据源。桥做**窄投影**，只取宿主 `snapshot.usage.contextWindow`
+的三个字段并逐项浅拷贝，绝不把整份会话快照搬到渲染端（`getSessionSnapshot` 是深拷贝，
+长会话点一次弹层要拷掉全部消息行，故不用于此路径）。
+
+```js
+{
+  used: number|null,                // 宿主 usedTokens（数值缺失/非有限 → null）
+  size: number|null,                // 宿主 maxTokens
+  breakdown: [{ source: string, chars: number }] | null
+}
+```
+
+- `breakdown` 逐项过滤：`source` 非字符串、`chars` 非有限正数的项直接丢弃；过滤后为空 → `null`。
+- 返回 `breakdown: null` 时 UI 退化为单色进度条且**不渲染图例**（不伪造分项）。
+- `source` 枚举由宿主定义（`system_prompt` / `meta_user_context` / `skills` / `tool_prompt` /
+  `system_tool_schemas` / `mcp_tool_schemas` / `messages`）。statusbar.js 用 `CTX_BUCKET_OF`
+  表把它们归三桶（系统提示词 / 工具定义 / 对话消息），**未登记的 source 不计入**，
+  比例在已知来源内归一。
+- 图例读数域是**占比**（桶内 chars ÷ 全部已知 chars），不是 deepseek 的原始 token 数。
+- 只在弹层打开时读一次，不进 1s 渲染循环；会话切换（`unmountBar`）时连同 `state.context` 一并清空。
+- 桥无 `getContextBreakdown` 时 statusbar.js 回退到 `getSessionSnapshot().snapshot.usage.contextWindow.breakdown`。
 
 ## 5. ramp 依赖与加载器组装
 
@@ -177,3 +203,6 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 8 | 上下文占用改为状态条自带圆环 pill，读宿主隐藏锚点 `[data-usage-used]/[data-usage-max]`；原设计「增强官方圆环」作废 | 官方 `data-usage-used` 在独立隐藏 span 上，不在圆环 SVG 祖先链内，`closest()` 取不到；aria 文案为 `上下文已用 {used} / 总量 {total}`，无百分比也无 `a/b` 形态，两条解析路径均无效。改为自绘 pill 后官方 DOM 零改写 | statusbar.js 头注释 |
 | 9 | 挂载门控读 `[data-session-id]`（`"draft"` 不渲染），探测从「10s 后放弃」改为 1s 常驻轮询 | 首页/新建任务无会话数据；SPA 内切换任务不重注入脚本，需随会话进出动态挂载/卸载 | statusbar.js 头注释 |
 | 10 | aggregate 返回值再扩展顶层 `tools` 明细分组（含 error 行时长；timing.toolTimeMs 既有口径不动） | 对齐原插件工具调用明细 | session-stats.cjs 头注释 |
+| 11 | 上下文弹层从「三行 key-value + 单色条」改为 deepseek `ContextMeter` 形态（头部一行读数 + 分段条 + 图例若干行，图例值域为占比）；桥新增窄投影 `getContextBreakdown()` | 用户要求对齐 deepseek 上下文窗口样式并保留字段占比。分段/图例需 breakdown，`getSessionSnapshot` 深拷贝整份会话不适合高频路径，故新增只投影三个字段的读取器 | statusbar.js `buildContextDetail` / `core/statusbar-bridge.js`；§4.4 |
+| 12 | `turns` 口径从「主会话完成请求数」改为「按 `turnId` 去重的用户输入轮数」；§4.3 行新增可选 `turnId` | 一轮的工具循环产生多次模型请求，按行计数把 1 轮数成 N 轮（实测 51 轮对应真实 2 个用户输入）。`turn_id` 列在现网库无空值；旧库缺列时 `_has_column` 探测降级为 `NULL as turn_id`，聚合端按独立一轮兜底 | `zusage.py` `_project_request_rows` / `session-stats.cjs` `countTurns`；§4.2/§4.3 |
+| 13 | 状态条用负 margin 下沉 `--zsb-sink` 占住宿主 dock 留白（`pb-4`+面板 `pb-1`）；弹层 `bottom` 同量抬回 | 状态条插在 `[data-v4-composer]` 之后，下方留着宿主 20px 底部内边距成为死区（实机红框）。下沉量由 `sinkIntoDockGap` 实测 `padding-bottom`（上限 24px 防误判），读不到时用 CSS 缺省 20px | statusbar.js `.zsb-bar` / `sinkIntoDockGap` |

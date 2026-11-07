@@ -185,7 +185,8 @@ class SubagentAndProjectionTests(unittest.TestCase):
 
     def test_model_contract_row_shape(self):
         r = zusage._model_contract_row({
-            "id": 7, "session_id": "sess_x", "query_source": "main_turn",
+            "id": 7, "session_id": "sess_x", "turn_id": "turn-1",
+            "query_source": "main_turn",
             "model_id": "glm-5", "status": "completed", "started_at": 100,
             "first_token_at": 200, "completed_at": 900,
             # input_tokens=100 已含 cache_read=60（缓存已含在 input，原值透传不重复相加）
@@ -194,7 +195,8 @@ class SubagentAndProjectionTests(unittest.TestCase):
             "cache_creation_input_tokens": 5,
         })
         self.assertEqual(r, {
-            "id": "7", "sid": "sess_x", "kind": "model", "isSubagent": False, "model": "glm-5",
+            "id": "7", "sid": "sess_x", "turnId": "turn-1",
+            "kind": "model", "isSubagent": False, "model": "glm-5",
             "thinking": True, "status": "completed", "startedAt": 100,
             "firstTokenAt": 200, "completedAt": 900, "inputTokens": 100,
             "outputTokens": 50, "cacheReadTokens": 60, "cacheWriteTokens": 5,
