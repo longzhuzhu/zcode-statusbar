@@ -1137,15 +1137,30 @@ def _is_subagent_row(session_id, query_source):
             or str(session_id or "").startswith("sess_subagent"))
 
 
+def _has_column(con, table, column):
+    """列存在性探测（只读 PRAGMA）。旧库/瘦身夹具缺列时 SELECT 会整条查询失败，
+    投影需按实际 schema 拼接可选列。探测失败一律视为不存在。"""
+    try:
+        for r in con.execute(f"pragma table_info({table})"):
+            if str(_col(r, "name") or "") == column:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _model_contract_row(r):
     """model_usage 行 → CONTRACT §4.3 请求行（纯函数）。
     thinking = 思考请求标记（reasoning_tokens>0）；Claude 系的 started_at 窗由消费方
     （session-stats.windowBasis）按 model 前缀自判，此处不重复判定。
     时间/token 取原值：缺失即 null，消费方按「非有限数值 = 缺失，逐行跳过」容错。
-    sid = 投影来源会话 id（CONTRACT §4.3 扩展）：内核按窗口焦点会话过滤后聚合，防串数（R10）。"""
+    sid = 投影来源会话 id（CONTRACT §4.3 扩展）：内核按窗口焦点会话过滤后聚合，防串数（R10）。
+    turnId = 用户输入轮标识（CONTRACT §4.3 扩展）：一轮的工具循环会产生多次模型请求，
+    聚合端按它去重才等于用户输入轮数；旧库缺列 → null，由消费方按独立一轮兜底。"""
     return {
         "id": str(_col(r, "id") if _col(r, "id") is not None else ""),
         "sid": str(_col(r, "session_id") or ""),
+        "turnId": _col(r, "turn_id"),
         "kind": "model",
         "isSubagent": _is_subagent_row(_col(r, "session_id"), _col(r, "query_source")),
         "model": _col(r, "model_id") or "",
@@ -1164,10 +1179,12 @@ def _model_contract_row(r):
 def _tool_contract_row(r):
     """tool_usage 行 → CONTRACT §4.3 请求行（kind='tool'）。工具行无 token 分项，恒 0；
     status 原样透传（session-stats 仅统计 completed 的步数，running/error 忽略）。
-    sid = 投影来源会话 id（同 _model_contract_row，供内核按窗口过滤）。"""
+    sid = 投影来源会话 id（同 _model_contract_row，供内核按窗口过滤）。
+    turnId = 所属输入轮（§4.3 扩展）：工具行不参与 turns 计数，仅为与 model 行同形状而投影。"""
     return {
         "id": str(_col(r, "id") if _col(r, "id") is not None else ""),
         "sid": str(_col(r, "session_id") or ""),
+        "turnId": _col(r, "turn_id"),
         "kind": "tool",
         "isSubagent": False,
         "model": _col(r, "tool_name") or "",
@@ -1183,8 +1200,12 @@ def _tool_contract_row(r):
     }
 
 
-_MODEL_ROW_COLS = """m.id, m.session_id, m.query_source, m.model_id, m.status, m.started_at,
-       m.first_token_at, m.completed_at, m.input_tokens, m.output_tokens,
+def _model_row_cols(con):
+    """model 行投影列清单；turn_id 列存在才取（缺列时 SELECT 会整条失败）。
+    其余列是 CONTRACT §4.3 的既有字段，按现网 schema 恒在，不做逐个探测。"""
+    turn = "m.turn_id" if _has_column(con, "model_usage", "turn_id") else "NULL as turn_id"
+    return f"""m.id, m.session_id, {turn}, m.query_source, m.model_id, m.status,
+       m.started_at, m.first_token_at, m.completed_at, m.input_tokens, m.output_tokens,
        m.reasoning_tokens, m.cache_read_input_tokens, m.cache_creation_input_tokens"""
 
 
@@ -1196,14 +1217,19 @@ def _project_request_rows(con, sids, cap=_ROWS_CAP):
       * 子代理：子会话（parent_id 指向请求会话）的 model 行，isSubagent=true；
       * 辅助 query_source（session_title 等）与子代理工具行不投影——混入会污染主口径。
     排序按完成时间升序（聚合端按 completedAt 排趋势）；单查询与总量各限 cap 行
-    （超长会话取最近，防 JSON 体量失控击穿内核 8MB stdout 护栏）。"""
+    （超长会话取最近，防 JSON 体量失控击穿内核 8MB stdout 护栏）。
+    turn_id：列存在才投影（旧库/瘦身夹具可能没有该列），缺列时行带 turnId=None，
+    聚合端按「独立一轮」兜底，不影响其余字段。"""
     if not sids:
         return []
     qm = ",".join("?" * len(sids))
+    has_tool_turn = _has_column(con, "tool_usage", "turn_id")
+    tool_turn_col = "t.turn_id" if has_tool_turn else "NULL as turn_id"
+    model_cols = _model_row_cols(con)
     rows = []
     # 主会话 model 行（辅助 query_source 不投影）
     for r in con.execute(
-        f"""select {_MODEL_ROW_COLS}
+        f"""select {model_cols}
             from model_usage m where m.session_id in ({qm})
               and (m.query_source is null or m.query_source='main_turn')
             order by coalesce(m.completed_at, m.started_at) desc limit ?""",
@@ -1212,7 +1238,7 @@ def _project_request_rows(con, sids, cap=_ROWS_CAP):
         rows.append(_model_contract_row(r))
     # 子代理 model 行（isSubagent=true；子会话由 session.parent_id 关联）
     for r in con.execute(
-        f"""select {_MODEL_ROW_COLS}
+        f"""select {model_cols}
             from model_usage m where m.query_source='subagent'
               and m.session_id in (select id from session where parent_id in ({qm}))
             order by coalesce(m.completed_at, m.started_at) desc limit ?""",
@@ -1221,7 +1247,7 @@ def _project_request_rows(con, sids, cap=_ROWS_CAP):
         rows.append(_model_contract_row(r))
     # 主会话工具行（kind='tool'）
     for r in con.execute(
-        f"""select t.id, t.session_id, t.tool_name, t.status, t.started_at, t.completed_at
+        f"""select t.id, t.session_id, {tool_turn_col}, t.tool_name, t.status, t.started_at, t.completed_at
             from tool_usage t where t.session_id in ({qm})
             order by coalesce(t.completed_at, t.started_at) desc limit ?""",
         (*sids, cap),

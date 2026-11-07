@@ -220,7 +220,7 @@ test('活动弹层含「输出速度（TPS）」行与人类可读时长', () =>
   assert.ok(text.includes('9.5秒'), '首字延迟为 X.X秒 格式');
   assert.ok(text.includes('输出速度（TPS）'), 'TPS 行渲染');
   assert.ok(text.includes('120 tok/s'), 'TPS 数值与底部状态条同源（会话均口径）');
-  assert.ok(text.includes('最近速度趋势'), '趋势区标题渲染');
+  assert.ok(text.includes('速度趋势'), '趋势区标题渲染');
 });
 
 test('无数据时 TPS 行显 --、趋势区空态兜底', () => {
