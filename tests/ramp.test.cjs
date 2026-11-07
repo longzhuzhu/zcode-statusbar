@@ -83,7 +83,7 @@ function unwrap(prev, h) {
 }
 
 test('输出格式：任意采样均为 6 位小写 hex', () => {
-  const speedSamples = [0, 1, 75, 150, 323, 800, 1400, 1999, 2000, 5000];
+  const speedSamples = [0, 1, 75, 150, 323, 499, 500, 501, 800, 2000];
   const ctxSamples = [0, 0.01, 0.25, 0.5, 0.7, 0.9, 0.95, 1, 1.5];
   for (const v of speedSamples) {
     assert.match(speedColor(v), /^#[0-9a-f]{6}$/);
@@ -103,11 +103,13 @@ test('锚点值精确返回锚点色（速度 + 上下文全锚点）', () => {
 });
 
 test('域外钳制：超上界封顶为末端锚点色', () => {
-  // 速度域 [0, 2000]：远超上界与边界外一点都封顶为紫
+  // 速度域 [0, 500]：上界即紫，远超上界与边界外一点都封顶为紫
   const purple = SPEED_ANCHORS[SPEED_ANCHORS.length - 1].c;
+  assert.equal(speedColor(500), purple);
+  assert.notEqual(speedColor(450), purple); // 段内点（hex 量化容差外的下界验证）
   assert.equal(speedColor(9999), purple);
   assert.equal(speedColor(1e9), purple);
-  assert.equal(speedColor(2000.0001), purple);
+  assert.equal(speedColor(500.0001), purple);
   // 上下文域 [0, 1]：封顶为深红
   const darkRed = CONTEXT_ANCHORS[CONTEXT_ANCHORS.length - 1].c;
   assert.equal(contextColor(1.2), darkRed);
@@ -130,9 +132,9 @@ test('无效输入返回中性灰：NaN / ±Infinity / 负数 / 非 number', () 
 });
 
 test('速度色阶：采样升序色相单调不回退', () => {
-  // 采样 0..2000（步长 25），色相沿最短路径展开后应单调非递减（红→绿→蓝→紫）
+  // 采样 0..500（步长 25），色相沿最短路径展开后应单调非递减（红→绿→蓝→紫）
   let prev = hexToHsl(speedColor(0)).h;
-  for (let v = 25; v <= 2000; v += 25) {
+  for (let v = 25; v <= 500; v += 25) {
     const h = hexToHsl(speedColor(v)).h;
     const cur = unwrap(prev, h);
     assert.ok(
@@ -191,10 +193,10 @@ function assertMidpoint(getColor, mid, hexA, hexB, label) {
 test('插值中点落在两锚点之间（hsl 比较，速度 3 段）', () => {
   // 0–150 段中点（跨 0°/360°：红 358° → 绿 131° 沿 +133° 方向）
   assertMidpoint(speedColor, 75, SPEED_ANCHORS[0].c, SPEED_ANCHORS[1].c, '速度 75');
-  // 150–800 段中点（绿 → 蓝）
-  assertMidpoint(speedColor, 475, SPEED_ANCHORS[1].c, SPEED_ANCHORS[2].c, '速度 475');
-  // 800–2000 段中点（蓝 → 紫）
-  assertMidpoint(speedColor, 1400, SPEED_ANCHORS[2].c, SPEED_ANCHORS[3].c, '速度 1400');
+  // 150–300 段中点（绿 → 蓝）
+  assertMidpoint(speedColor, 225, SPEED_ANCHORS[1].c, SPEED_ANCHORS[2].c, '速度 225');
+  // 300–500 段中点（蓝 → 紫）
+  assertMidpoint(speedColor, 400, SPEED_ANCHORS[2].c, SPEED_ANCHORS[3].c, '速度 400');
 });
 
 test('插值中点落在两锚点之间（hsl 比较，上下文 3 段）', () => {

@@ -1,13 +1,13 @@
 /*!
  * statusbar.js —— ZCode 状态条 UI（renderer 注入，IIFE，无框架）
  *
- * 职责（prd R1/R3/R4/R5/R6/R7/R12）：输入框下方水平居中状态条，四控件（Activity / Usage / 子代理 / 齿轮）、
- * 详情弹层、齿轮短菜单、估算态呼吸标识、官方上下文圆环色阶增强；身份不可确认则不渲染。
+ * 职责（prd R1/R3/R4/R5/R6/R7/R12）：输入框下方水平居中状态条，五控件（Activity / Usage / 上下文 /
+ * 子代理 / 齿轮）、详情弹层、齿轮短菜单、估算态呼吸标识；仅真实会话内渲染，身份不可确认则不渲染。
  * 全部 DOM 自绘、无第三方依赖、无构建步骤；样式经 CSS 变量对齐官方 mono 栈与字号。
  *
  * 依赖的全局（均可缺失并降级，契约见 statusbar/CONTRACT.md）：
  * - window.__ZCODE_STATUSBAR_BRIDGE__   内核静态桥 { getPaneId(), getSessionSnapshot() }；缺失/返回 null → 不渲染（防串数）。
- * - window.__ZCODE_STATUSBAR_RAMP__     色阶 { speedColor, contextColor }（加载器组装自 ramp.js）；缺失 → 数字退中性灰、圆环不覆盖。
+ * - window.__ZCODE_STATUSBAR_RAMP__     色阶 { speedColor, contextColor }（加载器组装自 ramp.js）；缺失 → 数字与圆环退中性灰。
  * - window.__ZCODE_STATUSBAR_TURN__     turn-stats.js 产出（经事件 "zcode-statusbar:turn" 同步）。
  * - window.__ZCODE_STATUSBAR_VERSION__  可选：加载器注入的版本号。
  * - window.__ZCODE_STATUSBAR_I18N__     可选：宿主语言文案覆盖（键见下方 I18N）。
@@ -18,7 +18,8 @@
  *    见 inject-main.cjs handlePayload），本 UI 经 normalizeSession() 取 aggregate 消费
  *    （形状见 CONTRACT.md §4.2）；直接推送 aggregate 形状的路径也兼容。
  * 2. 齿轮"重置会话统计"除派发 "zcode-statusbar:reset-session" 外，本地同步清空显示（用户即时反馈）。
- * 3. 上下文占用不重复渲染第二圆环：仅对官方圆环做描边覆盖（R4 增强）；探测失败静默。
+ * 3. 上下文占用由本状态条自带的圆环 pill 承载（R4），官方上下文按钮的 DOM/样式/交互一概不改写；
+ *    数据读宿主隐藏锚点 [data-usage-used] / [data-usage-max]（官方同源口径）。
  */
 
 (function () {
@@ -34,13 +35,11 @@
 
   // 估算态时效：turn 样本 updatedAt 超过此时长即认为本轮生成结束，切回核实态（会话均）
   var TURN_FRESH_MS = 3000;
-  // 挂载重试：500ms × 20 次 = 10s 静默重试窗口，超窗放弃（身份/锚点仍未就绪）
-  var MOUNT_RETRY_MS = 500;
-  var MOUNT_RETRY_MAX = 20;
-  // 官方圆环增强轮询周期
-  var RING_POLL_MS = 1000;
+  // 挂载/会话探测周期：SPA 内切换任务不重注入脚本，需常驻低频轮询——
+  // 进入会话时挂载、回到 draft 或无会话时卸载。
+  var MOUNT_POLL_MS = 1000;
 
-  // 挂载锚点候选（输入框容器），自上而下取第一个命中者；全部失效 → 重试窗口后放弃。
+  // 输入框挂载锚点候选，自上而下取第一个命中者。
   // ZCode 宿主 DOM 未公开稳定锚点，候选为启发式，需实机校准。
   var MOUNT_ANCHORS = [
     '[data-zcode-composer]', // 未来官方/内核预留标记（乐观候选）
@@ -51,14 +50,15 @@
     '[contenteditable="true"]', // 输入编辑器本身（挂到其父容器之后）
   ];
 
-  // 官方上下文圆环探测候选（SVG 或其宿主按钮）。占用解析为 aria-label / data-usage-* 双源；
-  // 官方 aria 文案未公开，以下正则为候选，需实机校准；探测失败一律静默（不残留）。
-  var RING_SELECTORS = [
-    '[data-usage-used] svg',
-    'button[aria-label*="context" i] svg',
-    'button[aria-label*="上下文"] svg',
-    'button[aria-label*="占用"] svg',
-  ];
+  // 会话身份锚点（宿主 SessionPane 根节点）：data-session-id 为 "draft" 表示首页/新建任务，
+  // 此时没有任何会话数据，不渲染状态条。R10：宁可少显示，不渲染错口径的空壳。
+  var SESSION_SELECTOR = '[data-session-id]';
+  var DRAFT_SESSION_ID = 'draft';
+
+  // 上下文占用数据源：宿主 V4ComposerToolbar 的隐藏 e2e 锚点（className:hidden 的 span，
+  // data-testid="v4-model-config"），与官方面板同源同口径（分母是完整 context window）。
+  // 按数据属性本身定位而非 testid：testid 改名时属性仍在。官方升级若整块移除 → 读不到 → pill 不渲染。
+  var USAGE_SELECTOR = '[data-usage-used]';
 
   // 事件名（与 CONTRACT.md 严格同步）
   var EV = {
@@ -79,24 +79,35 @@
     estTip: '估算值：按字符增量推得，非精确 tok/s',
     verifiedTip: '会话均：Σ输出 token ÷ Σ生成时长',
     usageTip: '累计 token 与缓存命中率（缓存已含在输入）',
+    contextTip: '上下文占用：与官方面板同源，分母为完整 context window',
     subRunningTip: '子代理运行中：活跃数 · 速度',
     subIdleTip: '子代理会话累计 token',
     gearTip: '状态条设置',
     noData: '暂无数据',
     activityTitle: '活动',
     usageTitle: '用量',
+    contextTitle: '上下文',
     modelTime: '模型用时',
     toolTime: '工具用时',
     ttft: '首字延迟',
     trend: '最近速度趋势',
+    tps: '输出速度（TPS）',
     inputTok: '输入',
     outputTok: '输出',
     cacheRead: '缓存读',
     cacheWrite: '缓存写',
+    toolsTitle: '工具调用',
+    toolsTotal: '合计',
+    toolCallsUnit: '次',
+    toolErrors: '错误',
     subagents: '子代理明细',
+    ctxUsed: '已用',
+    ctxTotal: '总量',
+    ctxPercent: '占比',
     menuShow: '显示',
     pillActivity: '活动',
     pillUsage: '用量',
+    pillContext: '上下文',
     pillSubagent: '子代理',
     pillGear: '齿轮',
     menuRefresh: '立即刷新',
@@ -121,21 +132,20 @@
 
   var state = {
     mounted: false,
-    givenUp: false,
     paneId: null,
     turn: null, // { tokPerSec, estimated, updatedAt }
     session: null, // session-stats.cjs aggregate() 输出
     sessionAt: 0, // 最近一次 session 数据到达时间（诊断用）
-    ring: null, // { pct, source } 圆环增强状态（诊断用）
+    context: null, // { used, size } 上下文占用（读宿主隐藏锚点，诊断用）
     lastError: null,
-    visible: { activity: true, usage: true, subagent: true, gear: true },
+    visible: { activity: true, usage: true, context: true, subagent: true, gear: true },
   };
 
   // 显示开关持久化
   try {
     var saved = JSON.parse(W.localStorage.getItem(LS_PIILLS) || 'null');
     if (saved && typeof saved === 'object') {
-      ['activity', 'usage', 'subagent', 'gear'].forEach(function (n) {
+      ['activity', 'usage', 'context', 'subagent', 'gear'].forEach(function (n) {
         if (typeof saved[n] === 'boolean') state.visible[n] = saved[n];
       });
     }
@@ -184,6 +194,20 @@
     return Math.round(ms) + 'ms';
   }
 
+  // 人类可读时长（对齐 deepseek 弹层口径）：12分4秒 / 5.5秒 / 1时23分 / 480ms
+  function fmtDur(ms) {
+    if (typeof ms !== 'number' || !isFinite(ms) || ms < 0) return '--';
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    var s = ms / 1000;
+    if (s < 60) return (Math.round(s * 10) / 10) + '秒';
+    var m = Math.floor(s / 60);
+    var rs = Math.round(s - m * 60);
+    if (rs >= 60) { m += 1; rs = 0; }
+    if (m < 60) return m + '分' + rs + '秒';
+    var h = Math.floor(m / 60);
+    return h + '时' + (m - h * 60) + '分';
+  }
+
   // ================= 样式注入 =================
 
   var CSS = [
@@ -205,6 +229,11 @@
     '.zsb-num{font-variant-numeric:tabular-nums;}',
     '.zsb-est{animation:zsb-breathe 2s ease-in-out infinite;}',
     '@keyframes zsb-breathe{0%,100%{opacity:1}50%{opacity:.55}}',
+    '.zsb-ring-fill{transition:stroke-dasharray .3s ease,stroke .3s ease;}',
+    '.zsb-ctxbar{height:4px;border-radius:999px;margin-top:10px;overflow:hidden;',
+    'background:color-mix(in srgb,currentColor 16%,transparent);}',
+    '.zsb-ctxbar-fill{display:block;height:100%;border-radius:999px;',
+    'background:currentColor;transition:width .3s ease;}',
     '.zsb-pop{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);',
     'min-width:220px;max-width:340px;padding:12px 14px;border-radius:12px;',
     'background:var(--zsb-pop-bg,var(--zsb-pop-bg-fallback,#fff));border:1px solid var(--zsb-pop-border,rgba(0,0,0,.12));',
@@ -215,9 +244,18 @@
     '.zsb-row{display:flex;justify-content:space-between;gap:16px;line-height:22px;}',
     '.zsb-row .k{opacity:.85;white-space:nowrap;}',
     '.zsb-row .v{white-space:nowrap;}',
+    // 工具名行截断：长工具名（如 MCP 全名）不撑破 max-width:340px 的弹层（.k 默认 nowrap 不截断）
+    '.zsb-row .zsb-tool-k{min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.zsb-sec{margin-top:10px;}',
-    '.zsb-trend{display:flex;align-items:flex-end;gap:3px;height:36px;margin-top:4px;}',
-    '.zsb-trend i{flex:1;min-width:3px;max-width:14px;border-radius:2px 2px 0 0;background:var(--zcode-color-text-secondary,currentColor);opacity:.6;display:block;}',
+    // 速度趋势折线图：SVG 按容器像素宽定点绘制，文字/网格线经类名统一弱化着色
+    '.zsb-trend{height:64px;margin-top:4px;}',
+    '.zsb-trend svg{display:block;width:100%;height:64px;}',
+    '.zsb-trend .zsb-tgrid{stroke:currentColor;stroke-width:1;}',
+    '.zsb-trend .zsb-tgrid.dash{stroke-dasharray:2 3;opacity:.18;}',
+    '.zsb-trend .zsb-tgrid.base{opacity:.25;}',
+    '.zsb-trend text{font-family:inherit;font-size:10px;}',
+    '.zsb-trend .zsb-tick{fill:currentColor;opacity:.55;}',
+    '.zsb-trend .zsb-tnow{font-weight:500;}',
     '.zsb-menu{display:flex;flex-direction:column;min-width:180px;}',
     '.zsb-menu-title{opacity:.7;margin-bottom:4px;}',
     '.zsb-mi{display:flex;justify-content:space-between;align-items:center;gap:12px;border:0;background:transparent;',
@@ -284,14 +322,26 @@
       '<circle cx="7" cy="2.8" r="1.8"/><circle cx="2.8" cy="11" r="1.8"/><circle cx="11.2" cy="11" r="1.8"/>' +
       '<path d="M7 4.6v3M7 7.6 3.6 9.5M7 7.6l3.4 1.9"/></svg>',
     gear:
-      '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<circle cx="7" cy="7" r="2.2"/><path d="M7 1.2v1.6M7 11.2v1.6M12.8 7h-1.6M2.8 7H1.2M11.1 2.9l-1.2 1.2M4.1 9.9l-1.2 1.2M11.1 11.1l-1.2-1.2M4.1 4.1 2.9 2.9"/></svg>',
+      '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M5.86 1.11L8.14 1.11L7.83 2.73L9.43 3.39L10.36 2.03L11.97 3.64L10.61 4.57L11.27 6.17L12.89 5.86L12.89 8.14L11.27 7.83L10.61 9.43L11.97 10.36L10.36 11.97L9.43 10.61L7.83 11.27L8.14 12.89L5.86 12.89L6.17 11.27L4.57 10.61L3.64 11.97L2.03 10.36L3.39 9.43L2.73 7.83L1.11 8.14L1.11 5.86L2.73 6.17L3.39 4.57L2.03 3.64L3.64 2.03L4.57 3.39L6.17 2.73Z"/>' +
+      '<circle cx="7" cy="7" r="2.15"/></svg>',
   };
+
+  // 上下文圆环（14×14，描边 2px，形态对齐 deepseek ContextMeter）。
+  // 底环固定 0.25 透明度；进度环描边色由色阶驱动，dash 长度按占用比例写入。
+  var RING_R = 5.5;
+  var RING_C = 2 * Math.PI * RING_R;
+  var CONTEXT_RING_SVG =
+    '<svg viewBox="0 0 14 14" width="14" height="14" fill="none" aria-hidden="true">' +
+    '<circle class="zsb-ring-track" cx="7" cy="7" r="' + RING_R + '" stroke="currentColor" stroke-width="2" opacity="0.25"/>' +
+    '<circle class="zsb-ring-fill" cx="7" cy="7" r="' + RING_R + '" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" transform="rotate(-90 7 7)"/></svg>';
 
   // ================= DOM 装配 =================
 
-  var ui = null; // mountBar 返回的控件引用集：{ bar, pop, pills:{activity,usage,subagent,gear}, activityLabel, speedNum, usageNum, cacheNum, subLabel, subSep, subSpeed }
-  var popMode = null; // 'activity' | 'usage' | 'menu' | null
+  var ui = null; // mountBar 返回的控件引用集：{ bar, pop, pills:{activity,usage,context,subagent,gear}, activityLabel, speedNum, usageNum, cacheNum, ctxPct, ctxFill, subLabel, subSep, subSpeed }
+  var popMode = null; // 'activity' | 'usage' | 'context' | 'menu' | null
+  var pendingTrend = null; // 待定点绘制的趋势样本：弹层 hidden 期间无像素宽，解除隐藏后 layoutTrend 消费
 
   function makePill(name, icon, title) {
     var p = el('button', 'zsb-pill');
@@ -329,6 +379,12 @@
     pUsage.appendChild(usageSep);
     pUsage.appendChild(cacheNum);
 
+    // 上下文：圆环 + 百分比（形态对齐 deepseek ContextMeter）。数据缺失时整 pill 隐藏（见 render）。
+    var pCtx = makePill('context', CONTEXT_RING_SVG, I18N.contextTip);
+    var ctxPct = el('span', 'zsb-num', '--');
+    pCtx.appendChild(ctxPct);
+    var ctxFill = pCtx.querySelector('.zsb-ring-fill');
+
     // 子代理：双态（运行中 = 活跃数·速度；闲 = 会话累计 token，中性灰）
     var pSub = makePill('subagent', ICONS.subagent, I18N.subIdleTip);
     var subLabel = el('span', 'zsb-num', '--');
@@ -349,6 +405,7 @@
 
     bar.appendChild(pAct);
     bar.appendChild(pUsage);
+    bar.appendChild(pCtx);
     bar.appendChild(pSub);
     bar.appendChild(pGear);
     bar.appendChild(pop);
@@ -362,12 +419,14 @@
     return {
       bar: bar,
       pop: pop,
-      pills: { activity: pAct, usage: pUsage, subagent: pSub, gear: pGear },
+      pills: { activity: pAct, usage: pUsage, context: pCtx, subagent: pSub, gear: pGear },
       activityLabel: actLabel,
       speedNum: speedNum,
       speedUnit: speedUnit,
       usageNum: usageNum,
       cacheNum: cacheNum,
+      ctxPct: ctxPct,
+      ctxFill: ctxFill,
       subLabel: subLabel,
       subSep: subSep,
       subSpeed: subSpeed,
@@ -388,12 +447,14 @@
     ui.pop.innerHTML = '';
     if (mode === 'activity') buildActivityDetail(ui.pop);
     else if (mode === 'usage') buildUsageDetail(ui.pop);
+    else if (mode === 'context') buildContextDetail(ui.pop);
     else if (mode === 'menu') buildMenu(ui.pop);
     else {
       closePop();
       return;
     }
     ui.pop.hidden = false;
+    layoutTrend(); // activity 弹层解除隐藏后才有容器像素宽，此时补画趋势图
   }
 
   function togglePop(mode) {
@@ -415,34 +476,142 @@
     return r;
   }
 
-  // Activity 详情：模型用时 / 工具用时 / TTFT / 最近速度趋势（speedTrend 占位数据接口）
+  // 上下文详情：已用 / 总量 + 占用进度条。数据与官方 pill 同源（隐藏锚点），
+  // 分解仅在有 breakdown 时才画分段条——宿主锚点当前不带 breakdown，退化为单色进度条。
+  function buildContextDetail(pop) {
+    var c = state.context;
+    sectionTitle(pop, I18N.contextTitle);
+    if (!c) {
+      pop.appendChild(el('div', 'k', I18N.noData));
+      return;
+    }
+    var pct = Math.min(1, Math.max(0, c.used / c.size));
+    pop.appendChild(row(I18N.ctxUsed, fmtTok(c.used)));
+    pop.appendChild(row(I18N.ctxTotal, fmtTok(c.size)));
+    pop.appendChild(row(I18N.ctxPercent, fmtPct(pct)));
+    var bar = el('div', 'zsb-ctxbar');
+    var fill = el('i', 'zsb-ctxbar-fill');
+    fill.style.width = (pct * 100).toFixed(1) + '%';
+    var ramp = rampApi();
+    fill.style.background = (ramp && ramp.contextColor(pct)) || '';
+    bar.appendChild(fill);
+    pop.appendChild(bar);
+  }
+
+  // Activity 详情：模型用时 / 工具用时 / TTFT / 输出速度（TPS）/ 最近速度趋势。
+  // 行序对齐 deepseek 弹层；TPS 与底部状态条速度数字同源（currentSpeed）同色阶（speedColor）。
   function buildActivityDetail(pop) {
     var s = state.session || {};
     sectionTitle(pop, I18N.activityTitle);
     var timing = s.timing || {};
-    pop.appendChild(row(I18N.modelTime, fmtMsNum(timing.modelTimeMs)));
-    pop.appendChild(row(I18N.toolTime, fmtMsNum(timing.toolTimeMs)));
-    pop.appendChild(row(I18N.ttft, fmtMsNum(timing.ttftMs)));
+    pop.appendChild(row(I18N.modelTime, fmtDur(timing.modelTimeMs)));
+    pop.appendChild(row(I18N.toolTime, fmtDur(timing.toolTimeMs)));
+    pop.appendChild(row(I18N.ttft, fmtDur(timing.ttftMs)));
+    var sp = currentSpeed();
+    var rTps = el('div', 'zsb-row');
+    rTps.appendChild(el('span', 'k', I18N.tps));
+    var tpsVal = el('span', 'v', sp ? Math.round(sp.v) + ' tok/s' : '--');
+    if (sp) {
+      var ramp = rampApi();
+      tpsVal.style.color = (ramp && ramp.speedColor(sp.v)) || ''; // 与底部速度数字同色阶
+      if (sp.est) tpsVal.className = 'v zsb-est'; // 估算态呼吸，与底部数字一致
+    }
+    rTps.appendChild(tpsVal);
+    pop.appendChild(rTps);
     var trendSec = el('div', 'zsb-sec');
     trendSec.appendChild(el('div', 'k', I18N.trend));
     var trend = Array.isArray(s.speedTrend) ? s.speedTrend : [];
     if (!trend.length) {
       trendSec.appendChild(el('div', 'k', I18N.noData));
     } else {
-      var box = el('div', 'zsb-trend');
-      trend.forEach(function (p) {
-        var b = el('i');
-        var h = Math.max(4, Math.min(100, (p.tokPerSec / 2000) * 100)); // 色阶同域（≥2000 封顶）作高度归一
-        b.style.height = h + '%';
-        b.title = Math.round(p.tokPerSec) + ' tok/s';
-        box.appendChild(b);
-      });
-      trendSec.appendChild(box);
+      // SVG 需容器像素宽定点，构建时弹层仍 hidden；先留空盒，openPop 解除隐藏后 layoutTrend 补画
+      trendSec.appendChild(el('div', 'zsb-trend'));
+      pendingTrend = trend;
     }
     pop.appendChild(trendSec);
   }
 
-  // Usage 详情：输入/输出/缓存读/缓存写分项 + 子代理明细。无任何费用字样。
+  // 趋势图补画：弹层解除隐藏后读一次 clientWidth（强制回流，宽值可靠）再按真实宽定点。
+  function layoutTrend() {
+    if (popMode !== 'activity' || !pendingTrend || !ui) return;
+    var box = ui.pop.querySelector('.zsb-trend');
+    if (!box) return;
+    var trend = pendingTrend;
+    pendingTrend = null;
+    box.innerHTML = buildTrendSvg(trend, box.clientWidth || 280);
+  }
+
+  // 速度趋势折线图（SVG 自绘，零依赖）：
+  // - 纵轴按本轮样本动态归一（非固定色阶域），保证小速度样本也有可见波动；
+  // - 顶/中虚线网格带峰值与半值标注，底部实线基线；
+  // - 折线描边沿 x 用各采样点 speedColor 取色的 linearGradient，数据点圆点同色，
+  //   颜色语义与底部状态条速度数字一致；
+  // - 右上角标注当前速度（末点值，同色），左上角标注峰值；
+  // - ramp 缺失 → 全图退 currentColor 中性灰（与数字降级口径一致）。
+  // 坐标按构建时容器像素宽定点：弹层打开期间宽度稳定，重开弹层即重算。
+  var TREND_H = 64; // 与 .zsb-trend 高度一致
+  function buildTrendSvg(trend, w) {
+    var padT = 14;
+    var padB = 6;
+    var plotH = TREND_H - padT - padB;
+    var vals = trend.map(function (p) {
+      return typeof p.tokPerSec === 'number' && isFinite(p.tokPerSec) ? Math.max(0, p.tokPerSec) : 0;
+    });
+    var n = vals.length;
+    var vpeak = Math.max.apply(null, vals);
+    var vmax = vpeak > 0 ? vpeak : 1; // 全零样本也画基线，避免除零
+    var plotW = Math.max(1, w - 2);
+    function x(i) {
+      return n > 1 ? 1 + (i / (n - 1)) * plotW : w / 2;
+    }
+    function y(v) {
+      return padT + (1 - v / vmax) * plotH;
+    }
+    function col(v) {
+      var ramp = rampApi();
+      return ramp ? ramp.speedColor(v) : 'currentColor';
+    }
+
+    var parts = [];
+    parts.push('<svg width="' + w + '" height="' + TREND_H + '" viewBox="0 0 ' + w + ' ' + TREND_H + '" aria-hidden="true">');
+    if (n > 1) {
+      var stops = '';
+      for (var i = 0; i < n; i++) {
+        stops += '<stop offset="' + (i / (n - 1)).toFixed(4) + '" stop-color="' + col(vals[i]) + '"/>';
+      }
+      parts.push('<defs><linearGradient id="zsb-trend-grad" x1="0" y1="0" x2="1" y2="0">' + stops + '</linearGradient></defs>');
+    }
+    var yTop = y(vpeak > 0 ? vpeak : 0); // 全零时顶网格线落基线，与折线重合
+    var yMid = y(vmax / 2);
+    var yBase = y(0);
+    parts.push('<line class="zsb-tgrid dash" x1="0" y1="' + yTop.toFixed(1) + '" x2="' + w + '" y2="' + yTop.toFixed(1) + '"/>');
+    parts.push('<line class="zsb-tgrid dash" x1="0" y1="' + yMid.toFixed(1) + '" x2="' + w + '" y2="' + yMid.toFixed(1) + '"/>');
+    parts.push('<line class="zsb-tgrid base" x1="0" y1="' + yBase.toFixed(1) + '" x2="' + w + '" y2="' + yBase.toFixed(1) + '"/>');
+    parts.push('<text class="zsb-tick" x="0" y="' + (yTop - 3).toFixed(1) + '">' + fmtTok(vpeak) + '</text>');
+    parts.push('<text class="zsb-tick" x="0" y="' + (yMid - 3).toFixed(1) + '">' + fmtTok(vmax / 2) + '</text>');
+    if (n > 1) {
+      var pts = '';
+      for (var j = 0; j < n; j++) {
+        pts += x(j).toFixed(1) + ',' + y(vals[j]).toFixed(1) + ' ';
+      }
+      var line = 'M' + x(0).toFixed(1) + ',' + yBase.toFixed(1) +
+        ' L' + pts.trim().split(' ').join(' L') +
+        ' L' + x(n - 1).toFixed(1) + ',' + yBase.toFixed(1) + ' Z';
+      parts.push('<path d="' + line + '" fill="url(#zsb-trend-grad)" opacity="0.14"/>');
+      parts.push('<polyline points="' + pts.trim() + '" fill="none" stroke="url(#zsb-trend-grad)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>');
+    }
+    for (var k = 0; k < n; k++) {
+      parts.push('<circle cx="' + x(k).toFixed(1) + '" cy="' + y(vals[k]).toFixed(1) + '" r="' + (k === n - 1 ? 2.5 : 2) +
+        '" fill="' + col(vals[k]) + '"><title>' + Math.round(vals[k]) + ' tok/s</title></circle>');
+    }
+    var last = vals[n - 1];
+    parts.push('<text class="zsb-tnow" x="' + w + '" y="10" text-anchor="end" fill="' + col(last) + '">' +
+      Math.round(last) + ' tok/s</text>');
+    parts.push('</svg>');
+    return parts.join('');
+  }
+
+  // Usage 详情：输入/输出/缓存读/缓存写分项 + 工具调用明细 + 子代理明细。无任何费用字样。
   function buildUsageDetail(pop) {
     var s = state.session || {};
     var t = s.tokens || {};
@@ -451,6 +620,30 @@
     pop.appendChild(row(I18N.outputTok, fmtTok(t.output)));
     pop.appendChild(row(I18N.cacheRead, fmtTok(t.cacheRead)));
     pop.appendChild(row(I18N.cacheWrite, fmtTok(t.cacheWrite)));
+    var tools = s.tools || {};
+    var toolSec = el('div', 'zsb-sec');
+    toolSec.appendChild(el('div', 'zsb-pop-title', I18N.toolsTitle));
+    var toolList = Array.isArray(tools.list) ? tools.list : [];
+    var toolTotal = typeof tools.total === 'number' && isFinite(tools.total) ? tools.total : 0;
+    if (!toolList.length && !toolTotal) {
+      toolSec.appendChild(el('div', 'k', I18N.noData));
+    } else {
+      toolSec.appendChild(row(I18N.toolsTotal, toolTotal + I18N.toolCallsUnit +
+        (tools.errors ? ' · ' + I18N.toolErrors + ' ' + tools.errors : '')));
+      toolList.forEach(function (item) {
+        var name = item.name || '--';
+        var r = el('div', 'zsb-row');
+        var k = el('span', 'zsb-tool-k', name);
+        k.title = name;
+        r.appendChild(k);
+        var v = el('span', 'v');
+        v.textContent = (item.count || 0) + I18N.toolCallsUnit + ' · ' + fmtMsNum(item.durationMs) +
+          (item.errors ? ' · ' + I18N.toolErrors + ' ' + item.errors : '');
+        r.appendChild(v);
+        toolSec.appendChild(r);
+      });
+    }
+    pop.appendChild(toolSec);
     var sub = s.subagent || {};
     var sec = el('div', 'zsb-sec');
     sec.appendChild(el('div', 'zsb-pop-title', I18N.subagents));
@@ -474,6 +667,7 @@
     [
       ['activity', I18N.pillActivity],
       ['usage', I18N.pillUsage],
+      ['context', I18N.pillContext],
       ['subagent', I18N.pillSubagent],
       ['gear', I18N.pillGear],
     ].forEach(function (pair) {
@@ -591,7 +785,10 @@
       '身份: 桥=' + (bridge ? '有' : '无') + ' paneId=' + (state.paneId || 'null'),
       '模块: turn-stats=' + (W.__ZCODE_STATUSBAR_TURN_API__ ? '有' : '无') +
         ' ramp=' + (rampApi() ? '有' : '无（降级中性灰）'),
-      '圆环: ' + (state.ring ? '已增强（' + Math.round(state.ring.pct * 100) + '%，来源 ' + state.ring.source + '）' : '未探测到'),
+      '上下文: ' + (state.context
+        ? fmtTok(state.context.used) + ' / ' + fmtTok(state.context.size) +
+          '（' + fmtPct(state.context.used / state.context.size) + '）'
+        : '未读到宿主锚点'),
       '最近会话数据: ' + (state.sessionAt ? new Date(state.sessionAt).toISOString() : '无'),
       '控件开关: ' + JSON.stringify(state.visible),
       '最近错误: ' + (state.lastError || '无'),
@@ -602,10 +799,12 @@
 
   // ================= 渲染 =================
 
+  // 显示 = 用户开关 AND 该 pill 有数据。上下文 pill 在宿主锚点缺席时整只不占位（R4/R10）。
   function renderVisibility() {
     if (!ui) return;
-    ['activity', 'usage', 'subagent', 'gear'].forEach(function (n) {
-      ui.pills[n].style.display = state.visible[n] ? '' : 'none';
+    ['activity', 'usage', 'context', 'subagent', 'gear'].forEach(function (n) {
+      var on = state.visible[n] && (n !== 'context' || !!state.context);
+      ui.pills[n].style.display = on ? '' : 'none';
     });
   }
 
@@ -659,6 +858,17 @@
     ui.usageNum.textContent = fmtTok(s.totalTokens) + ' tok';
     ui.cacheNum.textContent = fmtPct(s.cacheHitRate);
 
+    // ---- 上下文：圆环 + 百分比；宿主锚点缺席或占用为 0 → 整只隐藏（R4/R10）----
+    var ctx = readContextUsage();
+    var ctxChanged = !!ctx !== !!state.context;
+    state.context = ctx;
+    if (ctx) {
+      var ctxPct = ctx.used / ctx.size;
+      ui.ctxPct.textContent = fmtPct(ctxPct);
+      renderContextRing(ctxPct);
+    }
+    if (ctxChanged) renderVisibility(); // 有/无占用切换时才动 display，避免每秒重排
+
     // ---- 子代理双态（R5）：运行中 = 活跃数·速度（上色阶）；闲 = 会话累计（中性灰）----
     var subRunning = sub.activeCount > 0;
     if (subRunning && typeof sub.activeTokPerSec === 'number' && isFinite(sub.activeTokPerSec)) {
@@ -682,84 +892,30 @@
     }
   }
 
-  // ================= 官方上下文圆环增强（R4，尽量实现、缺席静默） =================
+  // ================= 上下文占用（R4，读宿主隐藏锚点；缺失静默） =================
 
-  // 解析占用：优先 data-usage-used/max（隐藏测试节点），失败退 aria-label 正则。
-  // 返回 { pct, source } 或 null；pct ∈ [0,1]。
-  function readRingUsage(svg) {
-    var host = svg.closest ? svg.closest('[data-usage-used]') : null;
-    if (host) {
-      var used = parseFloat(host.getAttribute('data-usage-used'));
-      var max = parseFloat(host.getAttribute('data-usage-max'));
-      if (isFinite(used) && isFinite(max) && max > 0) return { pct: Math.min(1, Math.max(0, used / max)), source: 'data-usage' };
+  // 返回 { used, size } 或 null。口径与官方 getRenderableTaskUsage 一致：
+  // used/size 必须有限且 > 0，否则视为「无可展示占用」，pill 整只不渲染。
+  function readContextUsage() {
+    var host = null;
+    try {
+      host = D.querySelector(USAGE_SELECTOR);
+    } catch (e) {
+      return null;
     }
-    var btn = svg.closest ? svg.closest('button[aria-label]') : null;
-    var label = btn ? btn.getAttribute('aria-label') || '' : '';
-    if (label) {
-      var mPct = label.match(/(\d+(?:\.\d+)?)\s*%/);
-      if (mPct) return { pct: Math.min(1, Math.max(0, parseFloat(mPct[1]) / 100)), source: 'aria-percent' };
-      var mFrac = label.match(/([\d.,]+)\s*\/\s*([\d.,]+)/);
-      if (mFrac) {
-        var a = parseFloat(mFrac[1].replace(/,/g, ''));
-        var b = parseFloat(mFrac[2].replace(/,/g, ''));
-        if (isFinite(a) && isFinite(b) && b > 0) return { pct: Math.min(1, Math.max(0, a / b)), source: 'aria-fraction' };
-      }
-    }
-    return null;
+    if (!host || !host.getAttribute) return null;
+    var used = parseFloat(host.getAttribute('data-usage-used'));
+    var size = parseFloat(host.getAttribute('data-usage-max'));
+    if (!isFinite(used) || !isFinite(size) || used <= 0 || size <= 0) return null;
+    return { used: used, size: size };
   }
 
-  // 覆盖进度环描边：仅动 opacity ≥ 0.4 的描边元素（官方底环 opacity 0.25 不动）
-  function applyRingStroke(svg, color) {
-    var changed = false;
-    var nodes = svg.querySelectorAll('circle, path, ellipse');
-    nodes.forEach(function (n) {
-      var stroke = n.getAttribute('stroke');
-      if (!stroke || stroke === 'none' || stroke === 'transparent') return;
-      var op = parseFloat(n.getAttribute('stroke-opacity'));
-      if (!isFinite(op)) {
-        try {
-          op = parseFloat(W.getComputedStyle(n).strokeOpacity);
-        } catch (e) {
-          op = 1;
-        }
-        if (!isFinite(op)) op = 1;
-      }
-      if (op < 0.4) return; // 底环：保持官方样式
-      n.setAttribute('style', 'stroke:' + color);
-      changed = true;
-    });
-    return changed;
-  }
-
-  function enhanceRing() {
+  // 圆环进度：dash 长度按占用比例；描边色走 contextColor 色阶（ramp 缺失 → 继承基色）。
+  function renderContextRing(pct) {
+    if (!ui || !ui.ctxFill) return;
     var ramp = rampApi();
-    if (!ramp) return; // 色阶缺失 → 不覆盖描边（保持官方原样），状态条数字退中性灰
-    for (var i = 0; i < RING_SELECTORS.length; i++) {
-      var nodes;
-      try {
-        nodes = D.querySelectorAll(RING_SELECTORS[i]);
-      } catch (e) {
-        continue;
-      }
-      for (var j = 0; j < nodes.length; j++) {
-        var svg = nodes[j].tagName === 'svg' ? nodes[j] : nodes[j].querySelector('svg');
-        if (!svg) continue;
-        var usage = readRingUsage(svg);
-        if (!usage) continue;
-        var color = ramp.contextColor(usage.pct);
-        if (!color) continue;
-        if (svg.getAttribute('data-zsb-ring') === color) {
-          state.ring = usage; // 已是目标色，仅刷新状态
-          return;
-        }
-        if (applyRingStroke(svg, color)) {
-          svg.setAttribute('data-zsb-ring', color);
-          state.ring = usage;
-          return;
-        }
-      }
-    }
-    state.ring = null; // 圆环缺席（如 Highspeed 锁定模型）：静默，无残留
+    ui.ctxFill.setAttribute('stroke-dasharray', (RING_C * pct).toFixed(2) + ' ' + RING_C.toFixed(2));
+    ui.ctxFill.setAttribute('stroke', (ramp && ramp.contextColor(pct)) || 'currentColor');
   }
 
   // ================= 身份与挂载 =================
@@ -793,31 +949,67 @@
   // aggregate 形状），不作为会话统计数据源——会话数据仅来自内核 session 事件（聚合缝），
   // "立即刷新"由内核重查 SQLite 后重发 session 事件（CONTRACT.md §7.6）完成反馈。
 
-  var mountTries = 0;
   var mountTimer = null;
+  var mountAnchor = null; // 当前挂载的输入框容器（用于检测宿主换 DOM 后重挂）
 
-  function attemptMount() {
-    if (state.mounted || state.givenUp) {
-      clearInterval(mountTimer);
-      return;
+  // 会话身份：以挂载点所在 SessionPane 的 data-session-id 为准。
+  // "draft" = 首页/新建任务，没有会话数据；找不到所属 pane 也按无会话处理（R10：宁可不显示）。
+  function isRealSession(node) {
+    var pane = null;
+    try {
+      pane = node.closest ? node.closest(SESSION_SELECTOR) : null;
+    } catch (e) {
+      pane = null;
     }
-    mountTries += 1;
+    if (!pane || !pane.getAttribute) return false;
+    var sid = pane.getAttribute('data-session-id');
+    return !!sid && sid !== DRAFT_SESSION_ID;
+  }
+
+  function unmountBar() {
+    closePop();
+    if (ui && ui.bar && ui.bar.parentNode) ui.bar.parentNode.removeChild(ui.bar);
+    ui = null;
+    mountAnchor = null;
+    state.mounted = false;
+    state.context = null;
+  }
+  function attemptMount() {
     var ident = identityOk();
     if (!ident) {
+      unmountBar();
       state.lastError = '身份不可确认（桥缺失或 paneId 为空）';
       return;
     }
+
     var anchor = findAnchor();
     if (!anchor) {
+      unmountBar();
       state.lastError = '未找到输入框挂载锚点';
       return;
     }
-    ui = mountBar(anchor);
-    if (!ui) {
+
+    // 换会话不重注入脚本（SPA 内切换），所以每轮都要核对：当前会话是否真实、宿主是否换了 DOM。
+    var stale = state.mounted && (anchor !== mountAnchor || !D.contains(ui && ui.bar));
+    if (stale) unmountBar();
+    if (state.mounted) {
+      state.paneId = ident.paneId;
+      state.lastError = null;
+      return;
+    }
+
+    if (!isRealSession(anchor)) {
+      state.lastError = null; // 首页/新建任务：正常状态，不是错误
+      return;
+    }
+
+    var mounted = mountBar(anchor);
+    if (!mounted) {
       state.lastError = '挂载点插入失败';
       return;
     }
-    clearInterval(mountTimer);
+    ui = mounted;
+    mountAnchor = anchor;
     state.mounted = true;
     state.paneId = ident.paneId;
     state.lastError = null;
@@ -828,43 +1020,26 @@
     applyThemeVars(ui.bar);
     renderVisibility();
     render();
-    bindEvents();
-    enhanceRing();
-    // 周期工作：圆环跟随 + 估算态过期切回核实态
-    setInterval(function () {
-      try {
-        enhanceRing();
-      } catch (e) {
-        state.ring = null; /* 单次增强异常静默 */
-      }
-    }, RING_POLL_MS);
-    setInterval(function () {
-      render(); // 估算态 3s 过期 → 核实态；tabular-nums + min-height 保证无跳动
-    }, 1000);
+    bindBarEvents();
   }
 
   function startMountLoop() {
     attemptMount();
-    mountTimer = setInterval(attemptMount, MOUNT_RETRY_MS);
-    setTimeout(function () {
-      if (!state.mounted) {
-        state.givenUp = true;
-        clearInterval(mountTimer);
-        // 静默放弃：不渲染任何内容，仅保留诊断路径（lastError 已记录）
-      }
-      clearInterval(mountTimer);
-    }, MOUNT_RETRY_MS * MOUNT_RETRY_MAX + 50);
+    mountTimer = setInterval(attemptMount, MOUNT_POLL_MS);
   }
 
   // ================= 事件绑定 =================
 
-  function bindEvents() {
-    // 控件点击：Activity/Usage → 详情弹层；齿轮 → 菜单
+  // 跟随 bar 生命周期的监听：随 REMOUNT 重建，故不挂 window/document 级持久监听。
+  function bindBarEvents() {
     ui.pills.activity.addEventListener('click', function () {
       togglePop('activity');
     });
     ui.pills.usage.addEventListener('click', function () {
       togglePop('usage');
+    });
+    ui.pills.context.addEventListener('click', function () {
+      togglePop('context');
     });
     ui.pills.gear.addEventListener('click', function () {
       togglePop('menu');
@@ -875,7 +1050,10 @@
       var mi = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
       if (mi && ui.pop.contains(mi)) onMenuAction(mi.dataset.act, mi.dataset.pill);
     });
+  }
 
+  // 全局监听只注册一次：turn/session 事件在 bar 未挂载时也要收，挂载后才能立刻出数据。
+  function bindGlobalEvents() {
     // 外点关闭（capture 阶段；点击 pill 本身交给 pill 的 toggle 处理，避免闪烁）
     D.addEventListener('click', function (ev) {
       if (popMode == null || !ui) return;
@@ -909,12 +1087,18 @@
       }
     });
 
+    // 周期渲染：估算态 3s 过期 → 核实态；tabular-nums + min-height 保证无跳动。
+    // 常驻而非随 bar 建立，重挂后不会叠加多个定时器。
+    setInterval(function () {
+      render();
+    }, 1000);
+
     // 主题变化（深浅切换）时重采变量
     try {
       var mq = W.matchMedia('(prefers-color-scheme: dark)');
       if (mq && typeof mq.addEventListener === 'function') {
         mq.addEventListener('change', function () {
-          applyThemeVars(ui.bar);
+          if (ui) applyThemeVars(ui.bar);
         });
       }
     } catch (e) {
@@ -936,5 +1120,6 @@
   }
 
   injectStyle();
+  bindGlobalEvents();
   startMountLoop();
 })();

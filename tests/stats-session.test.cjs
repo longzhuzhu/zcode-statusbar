@@ -203,3 +203,76 @@ test('aggregate 缺省 now 参数可用（Date.now 兜底）', () => {
   assert.equal(agg.subagent.activeCount, 1);
   assert.equal(agg.subagent.activeTokPerSec, null); // 窗口远超 1h → 无有效活跃速度
 });
+
+// ---- tools 工具调用明细（对齐原插件口径：completed+error 计入，running 不计）----
+
+test('tools：按工具名聚合，同名 count/durationMs 求和，list 只出一行', () => {
+  const rows = [
+    row({ id: 't1', kind: 'tool', model: 'Bash', status: 'completed', startedAt: 1000, completedAt: 2500 }),
+    row({ id: 't2', kind: 'tool', model: 'Bash', status: 'completed', startedAt: 3000, completedAt: 3600 }),
+  ];
+  const agg = aggregate(rows);
+  assert.equal(agg.tools.total, 2);
+  assert.equal(agg.tools.errors, 0);
+  assert.equal(agg.tools.list.length, 1);
+  assert.deepEqual(agg.tools.list[0], { name: 'Bash', count: 2, durationMs: 2100, errors: 0 });
+});
+
+test('tools：error 行计入 count/errors/durationMs；running 行完全不计', () => {
+  const rows = [
+    row({ id: 'a', kind: 'tool', model: 'Bash', status: 'error', startedAt: 1000, completedAt: 1500 }),
+    row({ id: 'b', kind: 'tool', model: 'Bash', status: 'completed', startedAt: 2000, completedAt: 2600 }),
+    row({ id: 'c', kind: 'tool', model: 'Bash', status: 'running', startedAt: 3000, completedAt: null }),
+    row({ id: 'd', kind: 'tool', model: 'Read', status: 'running', startedAt: 3000, completedAt: null }),
+  ];
+  const agg = aggregate(rows);
+  assert.equal(agg.tools.total, 2);
+  assert.equal(agg.tools.errors, 1);
+  assert.equal(agg.tools.list.length, 1);
+  assert.equal(agg.tools.list[0].count, 2);
+  assert.equal(agg.tools.list[0].errors, 1);
+  assert.equal(agg.tools.list[0].durationMs, 1100);
+});
+
+test('tools：时间戳缺失或倒挂的 error 行计 count/errors、不计时长', () => {
+  const agg = aggregate([
+    row({ id: 'a', kind: 'tool', model: 'Bash', status: 'error', startedAt: null, completedAt: 1500 }),
+    row({ id: 'b', kind: 'tool', model: 'Read', status: 'error', startedAt: 2000, completedAt: 1000 }),
+  ]);
+  assert.equal(agg.tools.total, 2);
+  assert.equal(agg.tools.errors, 2);
+  assert.equal(agg.tools.list.length, 2);
+  for (const t of agg.tools.list) assert.equal(t.durationMs, 0);
+});
+
+test('tools：list 排序 count 降序、同次数按工具名升序', () => {
+  const rows = [
+    row({ id: '1', kind: 'tool', model: 'Zed', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '2', kind: 'tool', model: 'mcp', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '3', kind: 'tool', model: 'Bash', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '4', kind: 'tool', model: 'Bash', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '5', kind: 'tool', model: 'Read', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '6', kind: 'tool', model: 'Read', status: 'completed', startedAt: 0, completedAt: 10 }),
+    row({ id: '7', kind: 'tool', model: 'Edit', status: 'completed', startedAt: 0, completedAt: 10 }),
+  ];
+  const agg = aggregate(rows);
+  assert.deepEqual(agg.tools.list.map((t) => t.name), ['Bash', 'Read', 'Edit', 'Zed', 'mcp']);
+});
+
+test('tools：空输入/无工具行返回 { total: 0, errors: 0, list: [] }', () => {
+  assert.deepEqual(aggregate([]).tools, { total: 0, errors: 0, list: [] });
+  assert.deepEqual(aggregate([row()]).tools, { total: 0, errors: 0, list: [] });
+});
+
+test('tools：工具名缺失（model 空串或 undefined）归 "" 聚合，total 仍计', () => {
+  const agg = aggregate([
+    row({ id: 'a', kind: 'tool', model: '', status: 'completed', startedAt: 0, completedAt: 100 }),
+    row({ id: 'b', kind: 'tool', model: undefined, status: 'error', startedAt: 0, completedAt: 200 }),
+  ]);
+  assert.equal(agg.tools.total, 2);
+  assert.equal(agg.tools.errors, 1);
+  assert.equal(agg.tools.list.length, 1);
+  assert.equal(agg.tools.list[0].name, '');
+  assert.equal(agg.tools.list[0].count, 2);
+  assert.equal(agg.tools.list[0].durationMs, 300);
+});

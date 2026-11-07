@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/statusbar/ui-guidelines.md", "reason": "状态条 UI 层编码约定：契约先行、静默降级链、命名空间纪律，本轮改动均在该层"}
+{"file": "statusbar/CONTRACT.md", "reason": "模块间接口唯一权威：speedTrend 形状、事件名、CSS 命名空间不得破坏"}
