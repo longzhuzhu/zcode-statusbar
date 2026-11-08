@@ -32,6 +32,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_I18N__` | 加载器（可选） | statusbar.js | 文案覆盖对象，键见 statusbar.js 的 I18N 常量（宿主语言覆盖点） |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
 | `__ZCODE_STATUSBAR_STREAM_SELECTORS__` | 内核/诊断（可选） | turn-stats.js | 数组，覆盖默认 DOM 选择器候选 |
+| `__ZCODE_STATUSBAR_DIAG__` | statusbar.js | 内核（diag 轮询） | `{ version, stage, ts, mounted, paneId, lastError, hasBridge, hasRamp, hasTurn, hasSession }`；挂载各分支实时更新，供 `diag-<n>.json` 落盘 |
 
 ## 3. window 事件（全部在 `window` 上派发/监听）
 

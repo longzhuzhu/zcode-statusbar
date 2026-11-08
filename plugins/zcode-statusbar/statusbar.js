@@ -1480,6 +1480,28 @@
     return { bridge: bridge, paneId: paneId };
   }
 
+  // 诊断：维护 window.__ZCODE_STATUSBAR_DIAG 供内核 diag 轮询落盘（inject-main 每 16 次推送收集）。
+  // 只读快照、永不抛错——诊断通道自身故障不得影响状态条主流程。
+  function syncDiag(stage) {
+    try {
+      W.__ZCODE_STATUSBAR_DIAG = {
+        version: VERSION,
+        stage: stage || null,
+        ts: Date.now(),
+        mounted: !!state.mounted,
+        paneId: state.paneId || null,
+        lastError: state.lastError || null,
+        hasBridge: !!W.__ZCODE_STATUSBAR_BRIDGE__,
+        hasRamp: !!(W.__ZCODE_STATUSBAR_RAMP__ || W.ZCodeStatusbarRamp),
+        hasTurn: !!W.__ZCODE_STATUSBAR_TURN__,
+        hasSession: !!state.session,
+        sessionReal: !!state.mounted,
+      };
+    } catch (e) {
+      /* 诊断写入失败静默 */
+    }
+  }
+
   // 说明：桥的 getSessionSnapshot() 返回宿主 conversation store 快照（非 CONTRACT §4.2
   // aggregate 形状），不作为会话统计数据源——会话数据仅来自内核 session 事件（聚合缝），
   // "立即刷新"由内核重查 SQLite 后重发 session 事件（CONTRACT.md §7.6）完成反馈。
@@ -1524,12 +1546,14 @@
     fitLevel = 0; // 新 bar 从最高档位重新自适应
     fitAvail = -1; // 宽度缓存失效，下次必测
     fitSpan = -1;
+    syncDiag('unmounted');
   }
   function attemptMount() {
     var ident = identityOk();
     if (!ident) {
       unmountBar();
       state.lastError = '身份不可确认（桥缺失或 paneId 为空）';
+      syncDiag('identity-failed');
       return;
     }
 
@@ -1537,6 +1561,7 @@
     if (!anchor) {
       unmountBar();
       state.lastError = '未找到输入框挂载锚点';
+      syncDiag('anchor-missing');
       return;
     }
 
@@ -1546,17 +1571,20 @@
     if (state.mounted) {
       state.paneId = ident.paneId;
       state.lastError = null;
+      syncDiag('mounted');
       return;
     }
 
     if (!isRealSession(anchor)) {
       state.lastError = null; // 首页/新建任务：正常状态，不是错误
+      syncDiag('draft-session');
       return;
     }
 
     var mounted = mountBar(anchor);
     if (!mounted) {
       state.lastError = '挂载点插入失败';
+      syncDiag('mount-failed');
       return;
     }
     ui = mounted;
@@ -1564,6 +1592,7 @@
     state.mounted = true;
     state.paneId = ident.paneId;
     state.lastError = null;
+    syncDiag('mounted');
     // turn 事件可能早于本文件事件绑定：挂载时补读全局最新样本
     if (W.__ZCODE_STATUSBAR_TURN__ && typeof W.__ZCODE_STATUSBAR_TURN__ === 'object') {
       state.turn = W.__ZCODE_STATUSBAR_TURN__;
@@ -1722,4 +1751,5 @@
   injectStyle();
   bindGlobalEvents();
   startMountLoop();
+  syncDiag('boot');
 })();

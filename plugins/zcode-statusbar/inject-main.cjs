@@ -55,12 +55,25 @@ const EVENT_SHIM = '(function(){if(window.__ZCODE_STATUSBAR_EVT_SHIM__)return;wi
   'fwd("zcode-statusbar:check-update","check");' +
   'fwd("zcode-statusbar:uninstall","uninstall");})();\n';
 const ZUSAGE = path.join(HERE, "zusage.py");
-const LOG = (...a) => console.error("[zcode-statusbar]", ...a);
+/* 文件日志：GUI 启动时主进程 console.error 不可见，排障必须落盘。超 1MB 直接清空重写
+ * （诊断日志允许丢旧，不做轮转复杂度）。写失败静默——日志自身故障不得影响插件。 */
+const LOG_FILE = path.join(HERE, "statusbar.log");
+function logToFile(line) {
+  try {
+    try { if (fs.statSync(LOG_FILE).size > 1 << 20) fs.writeFileSync(LOG_FILE, ""); } catch (e) { }
+    fs.appendFileSync(LOG_FILE, new Date().toISOString() + " " + line + "\n");
+  } catch (e) { }
+}
+const LOG = (...a) => {
+  console.error("[zcode-statusbar]", ...a);
+  logToFile(a.map((x) => (typeof x === "string" ? x : String(x))).join(" "));
+};
 const loadedHashes = { _loadedAt: Date.now() - process.uptime() * 1000 };
 for (const name of ["inject-main.cjs", "plugin-updater.cjs", "plugin-release.cjs", "plugin-storage.cjs", "engine-patch.cjs", "statusbar-bridge.js", "turn-stats.js", "ramp.js", "statusbar.js", "session-stats.cjs", "zusage.py"]) {
   try { loadedHashes[name] = createHash("sha256").update(fs.readFileSync(path.join(HERE, name))).digest("hex"); }
   catch (e) { LOG("startup fingerprint unavailable:", name, e.message); }
 }
+LOG("loader booted, electron", process.versions.electron, "files:", Object.keys(loadedHashes).length - 1);
 function acknowledgeRestart(done) {
   const helper = path.join(HERE, "runtime_lock.py");
   const finish = () => {
@@ -1041,15 +1054,26 @@ setInterval(pollPluginRequests, 1000);
 setInterval(() => { if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message)); }, 60000);
 if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message));
 
+const skipLogged = new Set();   // 每窗口只记一次跳过原因（导航会反复触发，防刷屏）
 function injectStatusbar(wc, reload = false) {
-  if (!isMainWindowState(wc) || wc.isDestroyed() || !isLocalHostPage(wc)) return;   // 外部页面不注入
+  if (!isMainWindowState(wc) || wc.isDestroyed()) return;
+  if (!isLocalHostPage(wc)) {   // 主窗但非宿主本地页：排障关键场景，原因落盘（每窗口一次）
+    if (!skipLogged.has(wc.id)) {
+      skipLogged.add(wc.id);
+      let url = "";
+      try { url = wc.getURL(); } catch (e) { url = "<getURL failed>"; }
+      LOG("inject skipped: main window not on local host page, url=", url.slice(0, 120));
+    }
+    return;
+  }
   const cleanup = '(function(){if(window.__ZCODE_STATUSBAR_DISPOSE__)window.__ZCODE_STATUSBAR_DISPOSE__();window.__ZCODE_STATUSBAR__=false;})();\n';
   /* 注入顺序固定：bridge → turn-stats → ramp → statusbar → 事件桥接 shim（各自幂等）。
    * 缺失的资产跳过（statusbar 侧文件未同步时降级为只注入内核 shim，DB 轮询链兜底）。 */
   const src = [rendererSrc.bridge, rendererSrc.turnStats, rendererSrc.ramp, rendererSrc.statusbar, EVENT_SHIM]
     .filter((s) => s).join("\n;\n");
-  if (!src) return;
+  if (!src) { LOG("inject aborted: no renderer assets present in", HERE); return; }
   wc.executeJavaScript((reload ? cleanup : "") + src, true).then(() => {
+    LOG("injected", reload ? "(hot reload)" : "", "into wc#" + wc.id);
     /* 无条件推送：updater 不可用时也要让面板拿到状态真值 */
     pushPluginState(wc, pluginUpdater ? pluginUpdater.status() : {});
     /* 注入即补推最近一次成功快照：maybeSpawn 的去重在 wants/db mtime 均未变化时
