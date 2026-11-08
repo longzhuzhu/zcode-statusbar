@@ -195,11 +195,12 @@ class SubagentAndProjectionTests(unittest.TestCase):
             "cache_creation_input_tokens": 5,
         })
         self.assertEqual(r, {
-            "id": "7", "sid": "sess_x", "turnId": "turn-1",
+            "id": "7", "sid": "sess_x", "turnId": "turn-1", "parentSid": None,
             "kind": "model", "isSubagent": False, "model": "glm-5",
             "thinking": True, "status": "completed", "startedAt": 100,
             "firstTokenAt": 200, "completedAt": 900, "inputTokens": 100,
             "outputTokens": 50, "cacheReadTokens": 60, "cacheWriteTokens": 5,
+            "subagentType": None, "task": None, "childSessionId": None,
         })
         self.assertEqual(r["inputTokens"] - r["cacheReadTokens"] - r["cacheWriteTokens"], 35)
 

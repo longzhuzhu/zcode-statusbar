@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/statusbar/ui-guidelines.md", "reason": "状态条 UI 层编码约定：DOM 全自绘、CSS 字符串数组、内联 SVG 图标表、只读宿主 DOM"}
+{"file": "statusbar/CONTRACT.md", "reason": "pill 名、DOM 标记、CSS 变量与 localStorage 键的唯一权威；§7 需同步"}

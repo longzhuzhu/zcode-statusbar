@@ -530,15 +530,19 @@ function handlePayload(payload) {
   /* 聚合缝（design §9）：session-stats.cjs 已部署时把 recent 行数组喂给 aggregate()
    *（契约 aggregate(rows) -> { sessionAvgTokPerSec, cacheHitRate, totalTokens,
    * subagent }），聚合结果随事件推送；模块缺席或抛错时仅推原始行（fail-open）。
-   * R10 防串数：行带 sid（zusage.py 投影），逐窗口只聚合本窗口焦点会话（IPC 上报的
-   * activeSid）的行；焦点未同步的窗口给空聚合——宁可少算，不推别的窗口的会话。 */
+   * R10 防串数：逐窗口只聚合本窗口焦点会话（IPC 上报的 activeSid）的行；焦点未同步的
+   * 窗口给空聚合——宁可少算，不推别的窗口的会话。
+   * 分桶键优先 parentSid：子代理行的 sid 是子会话 id（sess_subagent_*），与父会话永远
+   * 不等，只按 sid 分桶会让子代理整批落空。parentSid 缺失时回落 sid，旧投影行为不变。 */
   const rows = Array.isArray(payload.recent) ? payload.recent : (Array.isArray(payload.rows) ? payload.rows : []);
   const bySid = new Map();
   for (const r of rows) {
     if (!r || typeof r !== "object") continue;
-    const sid = typeof r.sid === "string" ? r.sid : "";
-    if (!bySid.has(sid)) bySid.set(sid, []);
-    bySid.get(sid).push(r);
+    const key = typeof r.parentSid === "string" && r.parentSid
+      ? r.parentSid
+      : (typeof r.sid === "string" ? r.sid : "");
+    if (!bySid.has(key)) bySid.set(key, []);
+    bySid.get(key).push(r);
   }
   const stats = sessionStats || loadSessionStats();
   const aggregateRows = stats && typeof stats.aggregate === "function"

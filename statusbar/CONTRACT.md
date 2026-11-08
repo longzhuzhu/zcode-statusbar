@@ -56,7 +56,10 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 - 无增量 → `tokPerSec` 归零（不冻结旧值）；文本回落 → 视为新轮重置窗口。
 - statusbar 侧新鲜度：`Date.now() - updatedAt < 3000ms` 视为"生成中"（估算态），否则切回核实态。
 
-### 4.2 session 数据（`zcode-statusbar:session` detail = `aggregate(rows, now?)` 返回）
+### 4.2 session 数据（`zcode-statusbar:session` detail = `{ ...zusage 快照, aggregate }`）
+
+detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_sids` 等，§4.5 记 `today`）；
+`aggregate` 键是下列聚合结果。UI 消费 `aggregate` 与顶层 `today`，其余键忽略。
 
 ```js
 {
@@ -67,21 +70,25 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
   totalTokens: number,            // input + output（缓存已含 input，不重复加）
   tokens: { input, output, cacheRead, cacheWrite },  // R6 Usage 弹层分项
   timing: { modelTimeMs, toolTimeMs, ttftMs },       // R6 Activity 弹层；ttftMs = 均值
-  speedTrend: [{ t: number, tokPerSec: number }],    // 最近 ≤10 完成轮，t = completedAt
+  speedTrend: [{ t: number, tokPerSec: number }],    // 最近 ≤10 个完成请求，t = completedAt；
+                                  // tokPerSec 与 sessionAvgTokPerSec 同口径（单请求 = output ÷ (completedAt−startedAt)）
   subagent: {
-    activeCount: number,          // status==='running' 的子代理数
+    activeCount: number,          // status==='running' 的子代理数（按 list 统计，含仅有投影行的运行中条目）
     activeTokPerSec: number|null, // 运行中子代理 Σ输出 ÷ Σ(now−首字) ，200ms 下限
     sessionTokens: number,        // 子代理 Σ(input+output)
-    rows: [{ id, model, status, outputTokens }]        // R6 子代理明细，最近 ≤20 行
+    rows: [{ id, model, status, outputTokens }],       // 旧形状，保留兼容；最近 ≤20 行
+    list: [subagentItem]          // 面板条目（§4.2.1），运行中在前按 startedAt 升序，已完成按 endedAt 降序
   },
   tools: {                        // R6 工具调用明细（扩展，见 §8 偏差 10）：对齐原插件口径，含 error 行，running 不计
-    total: number,                // completed+error 工具调用总次数
-    errors: number,               // status==='error' 的次数
+    total: number,                // completed+error 工具调用总次数（UI 不再展示，聚合仍产出）
+    errors: number,               // status==='error' 的次数（UI 不再展示，聚合仍产出）
     list: [{ name, count, durationMs, errors }]        // 按工具名聚合（name 取行 model）；count 降序、同次数按名升序；
                                   // durationMs = Σ(completedAt−startedAt) 含 error 行，时间戳缺失/倒挂的行不计；
                                   // timing.toolTimeMs 仍仅算 completed 行（既有口径不动）
+                                  // UI 每行只渲染 count 与 durationMs（§8 偏差 16）
   }
 }
+
 ```
 
 ### 4.3 aggregate 输入行（内核从 SQLite 投影；非有限数值 = 缺失，逐行跳过）
@@ -92,23 +99,68 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
   sid: string,                      // 投影来源会话 id（扩展）：内核按窗口焦点会话过滤聚合（R10 防串数）
   turnId: string|null,              // 用户输入轮标识（扩展）：同一轮工具循环产生的多次模型请求共享一个
                                     // turn_id；null = 旧库缺列，按「独立一轮」计（宁可多算，不丢轮次）
-  kind: 'model' | 'tool',           // 缺省按 'model'
+  parentSid: string|null,           // 行所属父会话（扩展）。子代理行的 sid 是子会话 id
+                                    // （sess_subagent_*），与父会话永不相等，内核按 parentSid 分桶；
+                                    // null = 该行本就属于主会话，分桶回落 sid
+  kind: 'model' | 'tool' | 'subagent',  // 'model' 缺省；'subagent' 见 §4.3.1
   isSubagent: boolean,              // 缺省 false
   model: string,
-  thinking: boolean,                // 思考请求标记（决定 started_at 窗）
+  thinking: boolean,                // 思考请求标记；仅供展示，不参与速度窗口选择
   status: 'running' | 'completed' | 'error',  // 仅 'completed' 计入完成态（严格判定）
   startedAt: number,                // ms
-  firstTokenAt: number|null,        // 首字时间；缺 → 首字窗退 started_at 窗
+  firstTokenAt: number|null,        // 首字时间；仅供 TTFT，不参与速度窗口（见下方口径）
   completedAt: number|null,
   inputTokens: number,              // 含缓存（cache_read/cache_write 已在内）
   outputTokens: number,
   cacheReadTokens: number,
-  cacheWriteTokens: number
+  cacheWriteTokens: number,
+  subagentType: string|null,        // 仅 kind='subagent'：subagent_type，如 'Explore'
+  task: string|null,                // 仅 kind='subagent'：Agent 工具的 description
+  childSessionId: string|null       // 仅 kind='subagent'：sess_subagent_+agentId，运行中为 null
 }
 ```
 
-口径（R2/R5）：有效生成窗 200ms ≤ 窗 < 1h；思考/`model` 含 `claude`（不分大小写）用
-`completed_at − started_at`，其余用 `completed_at − first_token_at`；子代理不计入主口径任何字段。
+口径（R2/R5）：有效生成窗 200ms ≤ 窗 < 1h；生成窗一律取 `completed_at − started_at`
+（整段请求跨度）。不按 `first_token_at` 缩窗：宿主该列由流式事件时间戳得出，而该时间戳在
+写队列 flush 时才赋值，实测落在请求跨度的 97%–100% 处（1501 条请求里 632 条首字窗不足
+30ms），按它缩窗会把 50 tok/s 的请求算成上万 tok/s，`speedTrend` 因此虚高到 5927 tok/s。
+子代理不计入主口径任何字段。
+
+#### 4.3.1 `kind='subagent'` 行（子代理生命周期记录）
+
+一条 Agent 工具调用出一行。它承载**存在性与任务名**，`inputTokens` / `outputTokens` 等 token 分项恒为 0
+（子代理的 token 由 `kind='model'` 且 `isSubagent=true` 的子会话行承担，两处不重复计）。
+
+必须单独成 kind 而非复用 `kind='tool'`：聚合层把 `kind='tool'` 计为工具调用次数，
+运行中的子代理若走 `kind='tool'` 会污染 `steps`。聚合层对 `kind='subagent'` 行的处理是
+「不进主口径、不进 `subRows`、只进 `subagent.list`」。
+
+运行中的子代理在宿主 `model_usage` 里没有记录（请求完成才落库），`kind='subagent'` 行是它存在的唯一证据。
+
+#### 4.3.2 `subagentItem`（`subagent.list` 元素）
+
+两态共用一种形状，靠 `status` 判别，不设 `isRunning` / `isDone` 之类的布尔。
+
+```js
+{
+  key: string,                  // 去重键：有子会话时用 childSessionId，否则用 toolCallId
+  toolCallId: string|null,      // Agent 工具调用 id，运行中必有
+  childSessionId: string|null,  // sess_subagent_+agentId，运行中为 null
+  type: string|null,            // subagent_type；缺 part 时为 null（不猜）
+  task: string|null,            // Agent 输入的 description；缺 part 时为 null
+  status: 'running' | 'completed' | 'error' | 'cancelled',
+  startedAt: number|null,
+  endedAt: number|null,         // 运行中恒为 null
+  durationMs: number|null,      // 运行中 = now − startedAt（实时）；已结束 = endedAt − startedAt
+  requests: number,             // 已完成请求数（运行中为 0）
+  inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens: number,
+  tpsAvg: number|null           // 已完成段加权平均；运行中为 null（不虚构速度）
+}
+```
+
+合并规则：`kind='subagent'` 行提供存在性与任务名，`kind='model'` 且 `isSubagent` 的行按
+`childSessionId` 回填 token 与请求数。对不上任何投影行的 model 行独立成条（token 有、任务名为 null），
+不与其他子代理合并。条目上限 `SUBAGENT_DETAIL_MAX`（20）。
 
 ### 4.4 上下文来源明细（`bridge.getContextBreakdown()` 返回）
 
@@ -133,6 +185,26 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 - 图例读数域是**占比**（桶内 chars ÷ 全部已知 chars），不是 deepseek 的原始 token 数。
 - 只在弹层打开时读一次，不进 1s 渲染循环；会话切换（`unmountBar`）时连同 `state.context` 一并清空。
 - 桥无 `getContextBreakdown` 时 statusbar.js 回退到 `getSessionSnapshot().snapshot.usage.contextWindow.breakdown`。
+
+### 4.5 顶层 `today` 块（全库今日口径，「今日用量」分组的数据源）
+
+```js
+{
+  requests: number,               // 今日 completed 请求数
+  input: number,                  // Σinput_tokens（含缓存）
+  output: number,                 // Σoutput_tokens
+  cache_read: number,             // Σcache_read_input_tokens
+  cache_write: number,
+  total: number,                  // Σcomputed_total_tokens（= input + output，实库 3208 行 0 条不符）
+  reasoning: number, retries: number,
+  started: number, last_at: number
+}
+```
+
+口径是**全库当日**已完成行（`zusage.py:_today_usage`，按 `completed_at` 落在本地日内过滤），
+与 §4.2 的本会话口径互不相干。UI 渲染 `input + output` 为「token 总用量」、
+`cache_read ÷ input` 为「平均缓存率」；`today` 缺失（直接推 aggregate 的兼容路径）时整组不渲染，
+不留空壳、不拿零值冒充。UI 侧独立存 `state.today`：会话聚合未变的新帧也会更新它。
 
 ## 5. ramp 依赖与加载器组装
 
@@ -167,9 +239,17 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 
 - localStorage `zcode-statusbar.pills`：`{ activity, usage, context, subagent, gear }` 五个布尔显示开关（R7，即时生效，卸载保留）。
 - DOM：statusbar.js 样式节点 id `zcode-statusbar-style`；条根元素 class `zsb-bar`；pill 标记 `data-zsb-pill`；
-  pill 名 `activity` / `usage` / `context` / `subagent` / `gear`；上下文圆环填充环 class `zsb-ring-fill`。
+  pill 名与视觉顺序 `activity` / `usage` / `subagent` / `context` / `gear`；上下文圆环填充环 class `zsb-ring-fill`；
+  子代理运行态绿点 class `zsb-livedot`（附 `zsb-pulse` 呼吸）；
+  子代理面板行 `data-subkey`（值为条目 `key`）、行状态点 class `zsb-subdot`（运行中加 `zsb-live` 标绿）、
+  返回按钮 `data-act="sub-back"`。
+- 子代理 pill 的显隐不只看开关：本会话从未出现过子代理时整只不占位，出现过后常驻。
+  粘滞标志 `state.subSeen` 是会话级状态，`unmountBar()`（换会话）时重置，跨会话不继承。
+  用户开关优先级更高：`visible.subagent === false` 时粘滞标志不使它显示。
+- 子代理 pill 双态：运行中 = 绿点 · 速度（不显示活跃数，个数见面板分组标题）；闲 = 会话累计 token。
 - CSS 变量：`--zcode-font-mono` / `--zcode-font-text-sm-size` / `--zcode-color-text-secondary`（宿主值采样自
-  `--font-mono` / `--text-ui-sm` / `--color-foreground-subtle`，缺省官方 mono 栈与 12px，见 R12 与 research）。
+  `--font-mono` / `--text-ui-sm` / `--color-foreground-subtle`，缺省官方 mono 栈与 12px，见 R12 与 research）；
+  `--zsb-live`（子代理运行态绿点，深色 `#3ecf8e` / 浅色 `#0c8a63`，由 `applyThemeVars` 按主题写入）。
 
 ## 8. 内核对齐点（并行代理/后续工作须知）
 
@@ -206,3 +286,6 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 11 | 上下文弹层从「三行 key-value + 单色条」改为 deepseek `ContextMeter` 形态（头部一行读数 + 分段条 + 图例若干行，图例值域为占比）；桥新增窄投影 `getContextBreakdown()` | 用户要求对齐 deepseek 上下文窗口样式并保留字段占比。分段/图例需 breakdown，`getSessionSnapshot` 深拷贝整份会话不适合高频路径，故新增只投影三个字段的读取器 | statusbar.js `buildContextDetail` / `core/statusbar-bridge.js`；§4.4 |
 | 12 | `turns` 口径从「主会话完成请求数」改为「按 `turnId` 去重的用户输入轮数」；§4.3 行新增可选 `turnId` | 一轮的工具循环产生多次模型请求，按行计数把 1 轮数成 N 轮（实测 51 轮对应真实 2 个用户输入）。`turn_id` 列在现网库无空值；旧库缺列时 `_has_column` 探测降级为 `NULL as turn_id`，聚合端按独立一轮兜底 | `zusage.py` `_project_request_rows` / `session-stats.cjs` `countTurns`；§4.2/§4.3 |
 | 13 | 状态条用负 margin 下沉 `--zsb-sink` 占住宿主 dock 留白（`pb-4`+面板 `pb-1`）；弹层 `bottom` 同量抬回 | 状态条插在 `[data-v4-composer]` 之后，下方留着宿主 20px 底部内边距成为死区（实机红框）。下沉量由 `sinkIntoDockGap` 实测 `padding-bottom`（上限 24px 防误判），读不到时用 CSS 缺省 20px | statusbar.js `.zsb-bar` / `sinkIntoDockGap` |
+| 14 | 速度口径统一为 `completedAt − startedAt`，删除 `windowBasis` 的思考/Claude 分支与首字缩窗 | 宿主 `first_token_at` 来自流式事件时间戳，而该时间戳在写队列 flush 时才赋值（`model-streaming-event-queue.ts` 把 append 串行化），首个增量块的时间戳因此落到请求末尾。实测该列位于请求跨度的 97%–100% 处，1501 条请求中 632 条的首字窗不足 30ms。沿用首字窗时这 632 条算出 >1000 tok/s（中位首字窗 26ms，全窗中位 5310ms），趋势图出现 5927 tok/s 的虚假尖峰；改全窗后同一批数据中位 50、p95 141、峰值 223，无一条超 500。首字时间仍用于 TTFT 展示 | session-stats.cjs `rowWindowMs`；§4.2/§4.3 |
+| 15 | 速度趋势从折线渲染改为单调三次贝塞尔曲线（Fritsch–Carlson 切线钳制） | 逐点折线在 64px 高度内呈锯齿状；Catmull-Rom 类插值会在峰谷过冲、画到峰值网格线之外。切线取相邻斜率的加权调和均值，段间保持单调，实测曲线 y 值域等于原始数据点值域 | statusbar.js `smoothPath` / `buildTrendSvg` |
+| 16 | 用量弹层三处调整：① 工具调用去掉合计行与每行错误计数（`tools.total`/`tools.errors`/`item.errors` 仍由聚合层产出，只是不渲染）；② 用量分组底部补「缓存占比」（会话口径 `cacheHitRate`）；③ 新增「今日用量」分组（`today` 块，全库口径）。 | 三个口径混在一个无分组边界的长列表里：合计行与每行尾部错误计数属噪音，而用户要看的是「本会话用量」与「今日用量」两块可比的读数；缓存命中率此前只在状态条 pill 上显示，弹层里看不到 | statusbar.js `buildUsageDetail` / `buildTodaySection`；§4.2 / §4.5 |

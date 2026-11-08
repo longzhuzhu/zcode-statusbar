@@ -1,0 +1,2 @@
+{"file": "statusbar/CONTRACT.md", "reason": "模块间契约权威：全局名/事件/数据形状/DOM 标记，本轮新增上下文数据源须在此登记"}
+{"file": ".trellis/spec/statusbar/ui-guidelines.md", "reason": "状态条 UI 层编码约定：防串数 R10、静默降级、命名空间纪律"}

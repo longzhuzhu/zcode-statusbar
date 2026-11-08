@@ -16,7 +16,7 @@
 | 豁免标记 | `.plugin-statusbar-optout` |
 | asar 临时/备份 | `app.asar.zcstatusbar.tmp` / `app.asar.zstatusbar.bak` |
 | 注入行标记 | `[zcode-statusbar]` |
-| 环境变量 | `ZCODE_STATUSBAR_*`（zusage.py 查询 CLI 自身保留 `ZUSAGE_` 命名空间） |
+| 环境变量 | `ZCODE_STATUSBAR_*`（旧 `ZUSAGE_*` 已消亡，仅存在于各文件头的改名对照注释，运行时零使用） |
 
 ## 双侧同步白名单（改一边必须改另一边）
 
@@ -30,12 +30,11 @@
 
 ## 渲染端注入与动作通道
 
-- 注入顺序：bridge → turn-stats → ramp → statusbar → EVENT_SHIM（事件桥接，见 `core/inject-main.cjs`）。
-- 齿轮动作：渲染端 window 事件 → EVENT_SHIM 翻译进 `__ZCODE_STATUSBAR_REQUESTS__` 队列 → `pollPluginRequests` 白名单执行（refresh / check / uninstall / relaunch / autocompact-* / release-notes*）。
+- 注入顺序：bridge → turn-stats → ramp → statusbar → EVENT_SHIM（事件桥接，见 `core/inject-main.cjs:1043` 注释「注入顺序固定」）。
+  - 注意：`statusbar/CONTRACT.md §1` 将 ramp 排在 turn-stats 之前，与实现注释不一致；两者相对顺序无硬约束，硬约束是 bridge 与二者都先于 statusbar.js。改注入逻辑时以代码注释为基准，并同步修正契约。
+- 齿轮动作：渲染端 window 事件 → EVENT_SHIM 翻译进 `__ZCODE_STATUSBAR_REQUESTS__` 队列 → `pollPluginRequests` 白名单执行（refresh / check / uninstall / relaunch / autocompact-* / release-notes*）；未知动作回执 `{ ok: false, error }` 不静默。
 - 跨模块契约唯一权威：`statusbar/CONTRACT.md`；改全局名/事件名/数据形状先改契约再改实现。
 
 ## 测试约定
 
-- Python：`python3 -m unittest discover tests -p "*.py"`（178 例基线）。
-- node：`npm test`（= `node --test tests/*.test.cjs`）。**本机 `node --test <目录>` 形式不可用**（目录被当模块解析报 MODULE_NOT_FOUND），必须用 glob。
-- 一切针对 asar/引擎/ZIP 的测试只用临时目录；禁止运行安装器、禁止触碰 `~/.zcode` 与已安装 ZCode。
+完整测试约定见 [../testing.md](../testing.md)。内核侧要点：一切针对 asar/引擎/ZIP 的测试只用临时目录；禁止运行安装器、禁止触碰 `~/.zcode` 与已安装 ZCode。

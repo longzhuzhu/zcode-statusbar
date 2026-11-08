@@ -47,9 +47,10 @@ SNAPSHOT_TOP_KEYS = {"local_error", "session", "last_turn", "last", "today",
                      "not_local", "known_sids", "context_window", "context_auto",
                      "code", "ctx_exc", "tools", "recent"}
 
-CONTRACT_ROW_KEYS = {"id", "sid", "turnId", "kind", "isSubagent", "model", "thinking", "status",
-                     "startedAt", "firstTokenAt", "completedAt",
-                     "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"}
+CONTRACT_ROW_KEYS = {"id", "sid", "turnId", "parentSid", "kind", "isSubagent", "model",
+                     "thinking", "status", "startedAt", "firstTokenAt", "completedAt",
+                     "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
+                     "subagentType", "task", "childSessionId"}
 
 SCHEMA = """
 create table session(
@@ -67,7 +68,7 @@ create table model_usage(
   context_exceeded integer);
 create table tool_usage(
   id text primary key, session_id text, tool_name text, status text,
-  started_at integer, completed_at integer, duration_ms integer);
+  tool_call_id text, started_at integer, completed_at integer, duration_ms integer);
 create table turn_usage(
   session_id text, turn_id text, status text,
   model_request_count integer, model_retry_count integer,
@@ -83,13 +84,21 @@ create table part(
 MAIN = "sess_main_1"
 SUB = "sess_subagent_a1"
 UNKNOWN = "sess_unknown_9"
+CALL_SUB = "call_sub_1"
 
 
-def agent_part_data(desc, agent_id):
-    """Agent 工具 part 的 data 形状（与宿主 part.state 同构，含回执 agentId 行）。"""
-    return json.dumps({"tool": "Agent",
-                       "state": {"input": {"description": desc, "prompt": "p" * 60},
-                                 "output": "done\nagentId: " + agent_id}})
+def agent_part_data(desc, agent_id, *, call=None, subagent_type=None):
+    """Agent 工具 part 的 data 形状（与宿主写库格式同构：紧凑 JSON + 回执 agentId 行）。
+    callID 是运行中条目与 tool_usage.tool_call_id 的 join 键；不给则不写该字段。"""
+    o = {"type": "tool",
+         "tool": "Agent",
+         "state": {"input": {"description": desc, "prompt": "p" * 60},
+                   "output": "done\nagentId: " + agent_id}}
+    if call:
+        o["callID"] = call
+    if subagent_type:
+        o["state"]["input"]["subagent_type"] = subagent_type
+    return json.dumps(o, separators=(",", ":"))
 
 
 class FixtureBase(unittest.TestCase):
@@ -153,13 +162,14 @@ class FixtureBase(unittest.TestCase):
         con.commit()
         con.close()
 
-    def add_tool(self, rid, sid, name, status="completed", started=T0, completed=_UNSET):
+    def add_tool(self, rid, sid, name, status="completed", started=T0, completed=_UNSET,
+                 call=None):
         completed = T0 + 500 if completed is _UNSET else completed
         duration = (completed - started) if completed is not None else None
         con = sqlite3.connect(self.db)
-        con.execute("insert into tool_usage(id, session_id, tool_name, status, started_at,"
-                    " completed_at, duration_ms) values(?,?,?,?,?,?,?)",
-                    (rid, sid, name, status, started, completed, duration))
+        con.execute("insert into tool_usage(id, session_id, tool_name, status, tool_call_id,"
+                    " started_at, completed_at, duration_ms) values(?,?,?,?,?,?,?,?)",
+                    (rid, sid, name, status, call, started, completed, duration))
         con.commit()
         con.close()
 
@@ -182,6 +192,15 @@ class FixtureBase(unittest.TestCase):
                     " values(?,?,?,?)", (sid, data, T0, updated))
         con.commit()
         con.close()
+
+    def session_snap(self, sid):
+        """直接取指定会话的完整快照（snapshot()["session"] 是「最新活跃会话」，
+        夹具里未必是被测会话，子代理列表断言走这条确定性入口）。"""
+        con = zusage.connect()
+        try:
+            return zusage._session_snapshot(con, sid, zusage.load_config())
+        finally:
+            con.close()
 
     # ---- 断言工具 ----
 
@@ -224,7 +243,10 @@ class FixtureBase(unittest.TestCase):
         self.add_tool("t2", MAIN, "Edit", "running", started=T0 + 9800, completed=None)
         self.add_tool("t3", MAIN, "Read", "error")
         self.add_turn_usage(MAIN, "t1")
-        self.add_part(MAIN, agent_part_data("探索仓库", "a1"))
+        self.add_part(MAIN, agent_part_data("探索仓库", "a1", call=CALL_SUB,
+                                           subagent_type="Explore"))
+        self.add_tool("ta", MAIN, "Agent", "completed", started=T0 + 2000,
+                      completed=T0 + 3200, call=CALL_SUB)
 
 
 class SnapshotStructureTests(FixtureBase):
@@ -308,6 +330,88 @@ class RequestRowProjectionTests(FixtureBase):
         self.assertEqual((tool["inputTokens"], tool["cacheReadTokens"]), (0, 0))
         # 运行中工具行也投影（步数口径由消费方只认 completed）
         self.assertEqual(by_id["t2"]["status"], "running")
+        # 空值字段在每种行上都存在（消费方按固定形状读，不做 key 探测）
+        for r in rows:
+            self.assertIn(r["parentSid"], (None, MAIN))
+            for key in ("subagentType", "task", "childSessionId"):
+                self.assertIn(key, r)
+
+    def test_parent_sid_marks_subagent_origin(self):
+        """parentSid：子代理行带父会话 id（sid 是子会话，内核按它分桶），其余为 None。"""
+        self.build_standard_fixture()
+        by_id = {r["id"]: r for r in self.rows_of(zusage.snapshot(MAIN))}
+        self.assertEqual(by_id["s1"]["sid"], SUB)
+        self.assertEqual(by_id["s1"]["parentSid"], MAIN)
+        self.assertIsNone(by_id["r1"]["parentSid"])
+        self.assertIsNone(by_id["t1"]["parentSid"])
+        self.assertIsNone(by_id["ta"]["parentSid"])
+
+    def test_subagent_kind_rows_carry_task_type_and_child(self):
+        """Agent 工具行投影为 kind='subagent'：带任务名、类型与回执关联的子会话 id，
+        token 恒 0（子代理 token 由 isSubagent 的 model 行承担，不重复计）。"""
+        self.build_standard_fixture()
+        subs = [r for r in self.rows_of(zusage.snapshot(MAIN)) if r["kind"] == "subagent"]
+        self.assertEqual(len(subs), 1)
+        row = subs[0]
+        self.assertEqual(row["id"], CALL_SUB)
+        self.assertEqual(row["sid"], MAIN)
+        self.assertEqual(row["parentSid"], MAIN)
+        self.assertTrue(row["isSubagent"])
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["task"], "探索仓库")
+        self.assertEqual(row["subagentType"], "Explore")
+        self.assertEqual(row["childSessionId"], SUB)
+        self.assertEqual(
+            (row["inputTokens"], row["outputTokens"],
+             row["cacheReadTokens"], row["cacheWriteTokens"]), (0, 0, 0, 0))
+        # 同一次调用仍有一条 kind='tool' 行：步数口径保持不变
+        tools = [r for r in self.rows_of(zusage.snapshot(MAIN))
+                 if r["kind"] == "tool" and r["model"] == "Agent"]
+        self.assertEqual(len(tools), 1)
+
+    def test_running_subagent_row_from_tool_usage(self):
+        """运行中子代理：tool_usage 的 running Agent 行 + part 的 callID 关联出任务名与类型。"""
+        self.build_standard_fixture()
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
+                      call="call_live_1")
+        self.add_part(MAIN, agent_part_data("恢复工具调用明细分组", "a2",
+                                           call="call_live_1",
+                                           subagent_type="pstack-zcode:poteto-agent"),
+                      updated=T0 + 20001)
+        zusage._TASK_CACHE.clear()
+        rows = self.rows_of(zusage.snapshot(MAIN))
+        live = next(r for r in rows if r["kind"] == "subagent"
+                    and r["status"] == "running")
+        self.assertEqual(live["id"], "call_live_1")
+        self.assertEqual(live["parentSid"], MAIN)
+        self.assertEqual(live["task"], "恢复工具调用明细分组")
+        self.assertEqual(live["subagentType"], "pstack-zcode:poteto-agent")
+        self.assertIsNone(live["childSessionId"])   # 子会话还没建
+        self.assertIsNone(live["completedAt"])
+        self.assertEqual(live["startedAt"], T0 + 20000)
+
+    def test_running_subagent_survives_missing_part(self):
+        """工具行在、part 缺失：条目照出，任务名与类型回落 null，绝不抛异常。"""
+        self.build_standard_fixture()
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
+                      call="call_live_2")
+        zusage._TASK_CACHE.clear()
+        live = next(r for r in self.rows_of(zusage.snapshot(MAIN))
+                    if r["id"] == "call_live_2")
+        self.assertEqual(live["status"], "running")
+        self.assertIsNone(live["task"])
+        self.assertIsNone(live["subagentType"])
+
+    def test_malformed_part_does_not_break_projection(self):
+        """part.data 非法 JSON：该条静默跳过，其余行与条目照常产出。"""
+        self.build_standard_fixture()
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
+                      call="call_live_3")
+        self.add_part(MAIN, "{not json", updated=T0 + 20002)
+        zusage._TASK_CACHE.clear()
+        rows = self.rows_of(zusage.snapshot(MAIN))
+        self.assertTrue(any(r["id"] == "call_live_3" for r in rows))
+        self.assertTrue(any(r["id"] == "r1" for r in rows))
 
     def test_input_tokens_include_cache_without_double_counting(self):
         """inputTokens 原值透传：100 = 净输入 30 + 缓存读 60 + 缓存写 10，绝不重复相加。"""
@@ -347,6 +451,133 @@ class RequestRowProjectionTests(FixtureBase):
         ids2 = {r["id"] for r in snap2["recent"]}
         self.assertIn("o1", ids2)
         self.assertIn("s1", ids2)
+
+
+class SubagentListTests(FixtureBase):
+    """session.sub.list：一种条目形状承载运行中与已结束两态（design §2 / §4.2）。"""
+
+    def item_of(self, status=None, call=None):
+        items = self.session_snap(MAIN)["sub"]["list"]
+        for it in items:
+            if status and it["status"] != status:
+                continue
+            if call and it["toolCallId"] != call:
+                continue
+            return it
+        self.fail(f"sub.list 无匹配条目 status={status} call={call}: {items}")
+
+    def test_done_item_fields(self):
+        self.build_standard_fixture()
+        it = self.item_of(status="completed")
+        self.assertEqual(it["childSessionId"], SUB)
+        self.assertEqual(it["toolCallId"], CALL_SUB)
+        self.assertEqual(it["type"], "Explore")
+        self.assertEqual(it["task"], "探索仓库")
+        self.assertEqual(it["requests"], 1)
+        self.assertEqual(it["total"], 1500)
+        self.assertEqual(it["started"], T0 + 2000)
+        self.assertEqual(it["endedAt"], T0 + 3200)
+        self.assertEqual(it["durationMs"], 1200)
+        for key in ("sid", "agent", "title", "status", "toolCallId", "childSessionId",
+                    "type", "task", "started", "endedAt", "durationMs", "requests",
+                    "input", "output", "cache_read", "reasoning", "cache_write",
+                    "last", "tps_avg", "active"):
+            self.assertIn(key, it)
+
+    def test_running_item_from_agent_tool_row(self):
+        self.build_standard_fixture()
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
+                      call="call_live_1")
+        self.add_part(MAIN, agent_part_data("调研留白来源", "a2", call="call_live_1",
+                                           subagent_type="Explore"), updated=T0 + 20001)
+        zusage._TASK_CACHE.clear()
+        it = self.item_of(status="running", call="call_live_1")
+        self.assertEqual(it["type"], "Explore")
+        self.assertEqual(it["task"], "调研留白来源")
+        self.assertIsNone(it["childSessionId"])
+        self.assertIsNone(it["endedAt"])
+        self.assertEqual(it["requests"], 0)
+        self.assertEqual(it["total"], 0)
+        self.assertEqual(it["started"], T0 + 20000)
+        self.assertIsNotNone(it["durationMs"])
+        self.assertGreater(it["durationMs"], 0)
+        self.assertTrue(it["active"])
+
+    def test_running_items_sorted_by_dispatch_then_done_by_recency(self):
+        self.build_standard_fixture()
+        self.add_tool("r2nd", MAIN, "Agent", "running", started=T0 + 22000, completed=None,
+                      call="call_b")
+        self.add_tool("r1st", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
+                      call="call_a")
+        zusage._TASK_CACHE.clear()
+        items = self.session_snap(MAIN)["sub"]["list"]
+        self.assertEqual([it["toolCallId"] for it in items[:2]], ["call_a", "call_b"])
+        self.assertEqual(items[-1]["status"], "completed")   # 已结束排在运行中之后
+
+    def test_ended_statuses_follow_tool_row(self):
+        """design §4.2 优先级 1：有工具行时取工具行状态（completed / error / cancelled）。"""
+        self.add_session(MAIN)
+        cases = [("a1", "completed"), ("a2", "error"), ("a3", "cancelled")]
+        for agent, status in cases:
+            child = "sess_subagent_" + agent
+            self.add_session(child, parent=MAIN)
+            self.add_model("m_" + agent, child, source="subagent")
+            self.add_part(MAIN, agent_part_data("任务" + agent, agent,
+                                                call="call_" + agent,
+                                                subagent_type="Explore"),
+                          updated=T0 + 10)
+            self.add_tool("t_" + agent, MAIN, "Agent", status,
+                          started=T0 + 1000, completed=T0 + 2000, call="call_" + agent)
+        zusage._TASK_CACHE.clear()
+        by_child = {it["childSessionId"]: it for it in
+                    self.session_snap(MAIN)["sub"]["list"]}
+        for agent, status in cases:
+            self.assertEqual(by_child["sess_subagent_" + agent]["status"], status,
+                             f"{agent} 状态应取工具行")
+
+    def test_status_falls_back_to_completed_without_tool_row(self):
+        """design §4.2 优先级 2：无工具行按 model 行推断（查询只取 completed 行 → completed）。"""
+        self.add_session(MAIN)
+        self.add_session(SUB, parent=MAIN)
+        self.add_model("s1", SUB, source="subagent")
+        self.add_part(MAIN, agent_part_data("只有模型行", "a1"))
+        zusage._TASK_CACHE.clear()
+        items = self.session_snap(MAIN)["sub"]["list"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["childSessionId"], SUB)
+        self.assertEqual(items[0]["status"], "completed")
+        self.assertIsNone(items[0]["toolCallId"])   # 没有工具行就没有 callID
+
+    def test_tool_row_without_child_session_still_listed(self):
+        """工具行有回执缺失：条目照出（childSessionId null），不因关联失败而消失。"""
+        self.add_session(MAIN)
+        self.add_tool("t_orphan", MAIN, "Agent", "completed", started=T0 + 1000,
+                      completed=T0 + 2000, call="call_orphan")
+        self.add_part(MAIN, json.dumps({"type": "tool", "tool": "Agent",
+                                        "callID": "call_orphan",
+                                        "state": {"input": {"description": "孤儿任务"},
+                                                  "output": ""}},
+                                       separators=(",", ":")))
+        zusage._TASK_CACHE.clear()
+        items = self.session_snap(MAIN)["sub"]["list"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["task"], "孤儿任务")
+        self.assertIsNone(items[0]["childSessionId"])
+        self.assertEqual(items[0]["status"], "completed")
+
+    def test_missing_tool_call_id_column_degrades_silently(self):
+        """瘦身库无 tool_call_id 列：Agent 行不产条目，其余投影与条目照常（不抛异常）。"""
+        self.build_standard_fixture()
+        con = sqlite3.connect(self.db)
+        con.executescript("alter table tool_usage drop column tool_call_id;")
+        con.commit()
+        con.close()
+        zusage._TASK_CACHE.clear()
+        snap = zusage.snapshot(MAIN)
+        self.assertIsNone(snap["local_error"])
+        self.assertFalse(any(r["kind"] == "subagent" for r in snap["recent"]))
+        self.assertEqual(
+            [i["childSessionId"] for i in self.session_snap(MAIN)["sub"]["list"]], [SUB])
 
 
 class ContextFallbackTests(FixtureBase):

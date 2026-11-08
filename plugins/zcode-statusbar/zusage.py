@@ -36,8 +36,9 @@ JSON 快照结构（相对原插件 zcode-token-usage-statusbar 的删除清单�
     （最新活跃会话，供诊断与上下文兜底）。
   * 投影范围（R10 宁可少算不可串数）：仅请求指定的会话；主会话只投影 main_turn/无标记
     的 model 行与全部工具行，子代理只投影 model 行（query_source='subagent' 或
-    sess_subagent_* 会话，isSubagent=true）；辅助 query_source（如 session_title）与
-    子代理工具行不投影；无指定会话时 recent 为空数组（不推其它会话的数据）。
+    sess_subagent_* 会话，isSubagent=true）与父会话 Agent 工具行（kind='subagent'，
+    子代理生命周期记录，token 恒 0）；辅助 query_source（如 session_title）与子代理
+    会话自身的工具行不投影；无指定会话时 recent 为空数组（不推其它会话的数据）。
   * 双实现口径分流（已知并接受，检查代理核对点）：完成态速度以 session-stats.cjs
     （状态条 UI 唯一权威）为准，其对缺 first_token_at 的行按 CONTRACT §4.3 回退
     started_at 窗；本文件 avg_tps/speed_segs 为诊断口径，沿用原插件严格规则
@@ -527,15 +528,24 @@ _TASK_CACHE = {}
 
 
 def _sub_agent_tasks(con, sid):
-    stamp = con.execute(
-        "select count(*), coalesce(max(time_updated),0) from part where session_id=?", (sid,)
-    ).fetchone()
+    """父会话的子代理索引（一次 part 扫描，运行中与已结束条目共用）：
+      children: 子会话 id → {task, type, call}（回执 agentId 关联，缺回执走标题前缀兜底）
+      calls:    tool_call_id → {task, type}（运行中条目没有子会话，只按 callID 取名字与类型）
+    失效键 = 父会话 part 行数 + 最新 time_updated（见 _TASK_CACHE 注释）。
+    part/session 表缺失（瘦身库）静默返回空索引：条目本身仍由工具行产出。"""
+    try:
+        stamp = con.execute(
+            "select count(*), coalesce(max(time_updated),0) from part where session_id=?",
+            (sid,),
+        ).fetchone()
+        sub_rows_titles = {r[0]: r[1] for r in con.execute(
+            "select id, title from session where parent_id=?", (sid,))}
+    except sqlite3.Error:
+        return {"children": {}, "calls": {}}
     key = (stamp[0], stamp[1])
     hit = _TASK_CACHE.get(sid)
     if hit and hit[0] == key:
         return hit[1]
-    sub_rows_titles = {r[0]: r[1] for r in con.execute(
-        "select id, title from session where parent_id=?", (sid,))}
     agent_parts = []
     for prow in con.execute(
         """select data, time_created from part
@@ -546,40 +556,144 @@ def _sub_agent_tasks(con, sid):
             o = json.loads(prow[0])
             st = o.get("state") or {}
             inp = st.get("input") or {}
-            desc = str(inp.get("description") or "").strip()
-            if desc:
-                agent_parts.append((desc, str(inp.get("prompt") or "").strip(),
-                                    str(st.get("output") or "")))
+            agent_parts.append((
+                str(o.get("callID") or "").strip() or None,
+                str(inp.get("description") or "").strip(),
+                str(inp.get("subagent_type") or "").strip() or None,
+                str(inp.get("prompt") or "").strip(),
+                str(st.get("output") or ""),
+            ))
         except Exception:
             continue   # part.data 解析失败跳过该条，不影响其余
-    tasks = {}
-    for desc, _prompt, out in agent_parts:
+    children, calls = {}, {}
+    for call, desc, stype, _prompt, out in agent_parts:
+        if call:
+            calls[call] = {"task": desc or None, "type": stype}
         m = re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out)
-        if m:
-            tasks["sess_subagent_" + m.group(1)] = desc
-    used = set(tasks)
-    for desc, prompt, out in agent_parts:
-        if re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out):
-            continue   # 已走回执关联
+        if m and desc:
+            children["sess_subagent_" + m.group(1)] = {"task": desc, "type": stype, "call": call}
+    used = set(children)
+    for call, desc, stype, prompt, out in agent_parts:
+        if not desc or re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out):
+            continue   # 已走回执关联，或无名可绑
         cands = [s for s, t in sub_rows_titles.items()
                  if s not in used and _prompt_matches(t, prompt)]
         if len(cands) == 1:
-            tasks[cands[0]] = desc
+            children[cands[0]] = {"task": desc, "type": stype, "call": call}
             used.add(cands[0])
+    idx = {"children": children, "calls": calls}
     if len(_TASK_CACHE) > 32:   # 防长驻膨胀：会话数有限，正常到不了；超了整表清掉
         _TASK_CACHE.clear()
-    _TASK_CACHE[sid] = (key, tasks)
-    return tasks
+    _TASK_CACHE[sid] = (key, idx)
+    return idx
 
 
-def _sub_item(r, sub_tasks, sub_gen):
-    """sub.list 单项（v217 统一浮层任务页）：基础聚合 + 每任务模型明细/费用已按决策 7 裁剪。"""
-    return {"sid": r[0], "agent": r[1], "title": r[2], "task": sub_tasks.get(r[0], ""),
-            "requests": r[3], "total": r[4],
-            "input": r[5], "output": r[6], "cache_read": r[7], "reasoning": r[8],
-            "cache_write": r[9], "last": (r[10] or 0), "started": (r[12] or 0),
-            "tps_avg": _rated_tps(*sub_gen.get(r[0], [0, 0])),
-            "active": bool(r[10] and int(time.time() * 1000) - r[10] < 30000)}
+def _agent_tool_rows(con, sid):
+    """本会话的 Agent 工具行（运行中 + 已结束），最近在前。
+    缺 tool_call_id 列的旧库/瘦身库返回空列表：没有 join 键就静默降级为空，不猜。
+    未登记的状态（宿主新增枚举）同样丢弃，宁可少算不漏算错。"""
+    if not _has_column(con, "tool_usage", "tool_call_id"):
+        return []
+    try:
+        rows = con.execute(
+            """select t.tool_call_id, t.status, t.started_at, t.completed_at
+               from tool_usage t where t.session_id=? and t.tool_name='Agent'
+               order by coalesce(t.completed_at, t.started_at) desc""",
+            (sid,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []   # 缺表/列漂移：运行中条目静默缺席，不影响已完成列表与主口径
+    return [r for r in rows
+            if _col(r, "tool_call_id") and (_col(r, "status") or "") in _SUBAGENT_STATUSES]
+
+
+def _sub_item(row, meta, sub_gen, status, now_ms):
+    """sub.list 单项：一种形状承载运行中/已结束两态，由 status 判别。
+    row = 聚合字段（运行中条目全零）；meta = part 索引的 task/type（可缺）；
+    status 按设计 §4.2：Agent 工具行状态优先，无工具行时按 model 行推断（调用方给 completed）。"""
+    meta = meta or {}
+    sid = row["sid"]
+    started = row["started"] or None
+    ended = None if status == "running" else (row["last"] or None)
+    if status == "running":
+        duration = now_ms - started if started else None
+    else:
+        duration = ended - started if started and ended and ended >= started else None
+    return {
+        "sid": sid, "agent": row["agent"], "title": row["title"],
+        "task": meta.get("task") or "", "type": meta.get("type"),
+        "status": status,
+        "toolCallId": meta.get("call"),
+        "childSessionId": sid or None,
+        "started": started or 0, "endedAt": ended, "durationMs": duration,
+        "requests": row["requests"], "total": row["total"],
+        "input": row["input"], "output": row["output"], "cache_read": row["cache_read"],
+        "reasoning": row["reasoning"], "cache_write": row["cache_write"],
+        "last": row["last"] or 0,
+        "tps_avg": _rated_tps(*sub_gen.get(sid, [0, 0])),
+        "active": status == "running" or bool(
+            row["last"] and now_ms - row["last"] < 30000),
+    }
+
+
+# Agent 工具行可表达的子代理状态（未登记的状态一律不产条目，宁可少算）
+_SUBAGENT_STATUSES = ("running", "completed", "error", "cancelled")
+
+
+def _sub_list(sub_rows, sub_index, sub_gen, agent_tools, now_ms):
+    """sub.list：已结束（子会话 model 聚合）+ 运行中/已结束（Agent 工具行）合并为一种形状。
+    子会话与工具行经 part 的 callID ←→ agentId 回执关联；关联不上的各出一行（宁可两行，
+    不把一个子代理的数据混作另一个）。排序：运行中按派发先后，已结束按最近活动倒序。"""
+    children = (sub_index or {}).get("children") or {}
+    calls_meta = (sub_index or {}).get("calls") or {}
+    # agent_tools 按最近活动倒序：setdefault 保留第一条，重试的同 callID 取最新态
+    by_call = {}
+    for t in agent_tools or []:
+        if _col(t, "tool_call_id"):
+            by_call.setdefault(_col(t, "tool_call_id"), t)
+    child_of = {m.get("call"): c for c, m in children.items() if m.get("call")}
+    items, seen = [], set()
+    for r in sub_rows:
+        child = r[0]
+        meta = children.get(child) or {}
+        tool = by_call.get(meta.get("call")) if meta.get("call") else None
+        status = _col(tool, "status") if tool is not None else None
+        if status not in _SUBAGENT_STATUSES:
+            status = "completed"   # 查询只取 completed 的 model 行，无工具行即按已完成兜底
+        tool_completed = _col(tool, "completed_at") if tool is not None else None
+        tool_started = _col(tool, "started_at") if tool is not None else None
+        items.append(_sub_item({
+            "sid": child, "agent": r[1], "title": r[2],
+            "requests": r[3], "total": r[4], "input": r[5], "output": r[6],
+            "cache_read": r[7], "reasoning": r[8], "cache_write": r[9],
+            "last": r[10] or tool_completed,
+            "started": r[12] or tool_started,
+        }, meta, sub_gen, status, now_ms))
+        seen.add(child)
+        if meta.get("call"):
+            seen.add("call:" + meta["call"])
+    for t in agent_tools or []:
+        call, status = _col(t, "tool_call_id"), _col(t, "status")
+        if not call or status not in _SUBAGENT_STATUSES:
+            continue
+        # 运行中条目一律 childSessionId=null：子会话此时还没有回执可关联
+        child = "" if status == "running" else (child_of.get(call) or "")
+        if child in seen or ("call:" + call) in seen:
+            continue   # 已有 model 行聚合条目或已产过本行
+        started, ended = _col(t, "started_at"), _col(t, "completed_at")
+        meta = dict(calls_meta.get(call) or {}, call=call)
+        items.append(_sub_item({
+            "sid": child, "agent": "", "title": "",
+            "requests": 0, "total": 0, "input": 0, "output": 0,
+            "cache_read": 0, "reasoning": 0, "cache_write": 0,
+            "last": ended, "started": started,
+        }, meta, sub_gen, status, now_ms))
+        seen.add(child or ("call:" + call))
+    running = sorted((i for i in items if i["status"] == "running"),
+                     key=lambda i: i["started"] or 0)
+    done = sorted((i for i in items if i["status"] != "running"),
+                  key=lambda i: i["endedAt"] or i["last"] or 0, reverse=True)
+    return running + done
 
 
 def render_session_detail(con, prefix):
@@ -642,14 +756,14 @@ def render_session_detail(con, prefix):
            where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
            group by m.session_id order by max(m.completed_at) desc""", (sid,)).fetchall()
     if sub_rows:
-        tasks = _sub_agent_tasks(con, sid)
+        children = _sub_agent_tasks(con, sid)["children"]
         lines.append(L(
             f"  子代理: {len(sub_rows)} 个 / {sum(r[2] for r in sub_rows):,}req / "
             f"合计 {sum(r[3] for r in sub_rows):,}",
             f"  Subagents: {len(sub_rows)} / {sum(r[2] for r in sub_rows):,}req / "
             f"total {sum(r[3] for r in sub_rows):,}"))
         for r in sub_rows[:8]:
-            name = tasks.get(r[0]) or r[1] or r[0]
+            name = (children.get(r[0]) or {}).get("task") or r[1] or r[0]
             lines.append(
                 f"    {fmt(r[3]):>8}  {r[2]:>3}req  {str(name).replace(chr(10), ' ')[:30]}  [{r[0][-6:]}]")
         if len(sub_rows) > 8:
@@ -985,9 +1099,11 @@ def _session_snapshot(con, sid, cfg):
     # 子代理任务名：Agent 工具调用 part 的 input.description（与宿主"子智能体目录"面板同源）。
     # 主关联用官方回执：完成后 part.state.output 尾部带 "agentId: agent_xxx" 行，
     # 子会话 id 即 "sess_subagent_"+agentId（客户端自己的硬关联，无歧义）。
-    # 兜底只给运行中尚未出现回执的条目：prompt 前缀匹配且候选唯一才绑（同前缀多候选宁可
+    # 兜底只给当时尚无回执的条目：prompt 前缀匹配且候选唯一才绑（同前缀多候选宁可
     # 无名，不做时间猜测——历史 part 不带 childSessionId，时间最近邻存在错位风险）。
-    sub_tasks = _sub_agent_tasks(con, sid) if sub_rows else {}
+    # 前置条件：跑过子代理才扫 part（无子代理的会话不为运行中条目白付一次全量 like 扫描）。
+    agent_tools = _agent_tool_rows(con, sid)
+    sub_tasks = _sub_agent_tasks(con, sid) if (sub_rows or agent_tools) else {}
     # 子代理已完成段速率（v97）：每子会话 Σ有效 output / Σ有效生成窗口的加权平均，
     # 口径与 _turn_rate 完全一致（first_token_at 缺失即无窗、含思考段窗口用 started_at）；
     # 无效段不进分母。运行中的请求未入库，这里只有已完成段。
@@ -1007,6 +1123,7 @@ def _session_snapshot(con, sid, cfg):
                 g[0] += tokens
                 g[1] += gen_ms
     now_ms = int(time.time() * 1000)
+    sub_list = _sub_list(sub_rows, sub_tasks, sub_gen, agent_tools, now_ms)
     sub = {
         "requests": sum(r[3] for r in sub_rows),
         "total": sum(r[4] for r in sub_rows),
@@ -1018,10 +1135,7 @@ def _session_snapshot(con, sid, cfg):
         "active": any(r[10] and now_ms - r[10] < 30000 for r in sub_rows),
         "rate_avg": _rated_tps(sum(g[0] for g in sub_gen.values()),
                                sum(g[1] for g in sub_gen.values())),
-        "list": [
-            _sub_item(r, sub_tasks, sub_gen)
-            for r in sub_rows
-        ],
+        "list": sub_list,
     }
     # 工具调用明细（tool_usage 表，本会话按工具分组；status=running 的行不计入）
     tool_rows = con.execute(
@@ -1149,18 +1263,22 @@ def _has_column(con, table, column):
     return False
 
 
-def _model_contract_row(r):
+def _model_contract_row(r, parent_sid=None):
     """model_usage 行 → CONTRACT §4.3 请求行（纯函数）。
-    thinking = 思考请求标记（reasoning_tokens>0）；Claude 系的 started_at 窗由消费方
-    （session-stats.windowBasis）按 model 前缀自判，此处不重复判定。
+    thinking = 思考请求标记（reasoning_tokens>0），仅供展示：消费方的速度窗口一律取
+    completed_at − started_at，不再按思考/Claude 分支选择窗口。
     时间/token 取原值：缺失即 null，消费方按「非有限数值 = 缺失，逐行跳过」容错。
     sid = 投影来源会话 id（CONTRACT §4.3 扩展）：内核按窗口焦点会话过滤后聚合，防串数（R10）。
+    parentSid = 行所属父会话（子代理行来自子会话，sid 永远不等于父会话）：内核按它分桶。
     turnId = 用户输入轮标识（CONTRACT §4.3 扩展）：一轮的工具循环会产生多次模型请求，
-    聚合端按它去重才等于用户输入轮数；旧库缺列 → null，由消费方按独立一轮兜底。"""
+    聚合端按它去重才等于用户输入轮数；旧库缺列 → null，由消费方按独立一轮兜底。
+    subagentType / task = 仅 kind='subagent' 行携带；model 行不为此再扫一遍 part。"""
+    sid = str(_col(r, "session_id") or "")
     return {
         "id": str(_col(r, "id") if _col(r, "id") is not None else ""),
-        "sid": str(_col(r, "session_id") or ""),
+        "sid": sid,
         "turnId": _col(r, "turn_id"),
+        "parentSid": parent_sid,
         "kind": "model",
         "isSubagent": _is_subagent_row(_col(r, "session_id"), _col(r, "query_source")),
         "model": _col(r, "model_id") or "",
@@ -1173,6 +1291,10 @@ def _model_contract_row(r):
         "outputTokens": _col(r, "output_tokens"),
         "cacheReadTokens": _col(r, "cache_read_input_tokens"),
         "cacheWriteTokens": _col(r, "cache_creation_input_tokens"),
+        "subagentType": None,
+        "task": None,
+        "childSessionId": sid if _is_subagent_row(
+            _col(r, "session_id"), _col(r, "query_source")) else None,
     }
 
 
@@ -1180,11 +1302,14 @@ def _tool_contract_row(r):
     """tool_usage 行 → CONTRACT §4.3 请求行（kind='tool'）。工具行无 token 分项，恒 0；
     status 原样透传（session-stats 仅统计 completed 的步数，running/error 忽略）。
     sid = 投影来源会话 id（同 _model_contract_row，供内核按窗口过滤）。
-    turnId = 所属输入轮（§4.3 扩展）：工具行不参与 turns 计数，仅为与 model 行同形状而投影。"""
+    turnId = 所属输入轮（§4.3 扩展）：工具行不参与 turns 计数，仅为与 model 行同形状而投影。
+    parentSid = null：工具行本就属于主会话。
+    Agent 工具行另有一条 kind='subagent' 行（子代理生命周期记录），本行保留是既有步数口径。"""
     return {
         "id": str(_col(r, "id") if _col(r, "id") is not None else ""),
         "sid": str(_col(r, "session_id") or ""),
         "turnId": _col(r, "turn_id"),
+        "parentSid": None,
         "kind": "tool",
         "isSubagent": False,
         "model": _col(r, "tool_name") or "",
@@ -1197,6 +1322,38 @@ def _tool_contract_row(r):
         "outputTokens": 0,
         "cacheReadTokens": 0,
         "cacheWriteTokens": 0,
+        "subagentType": None,
+        "task": None,
+        "childSessionId": None,
+    }
+
+
+def _subagent_contract_row(r, parent_sid, meta):
+    """Agent 工具行 → kind='subagent' 行（子代理生命周期记录，两态共用一种形状）。
+    与 kind='tool' 的区别是消费方语义：聚合层不会把它算成一次工具调用，运行中条目
+    也不会污染步数。token 分项恒 0——子代理的 token 由 model 行（isSubagent=true）承担，
+    两处不重复计。task / type 取自 part（缺失即 null，不猜）。"""
+    meta = meta or {}
+    return {
+        "id": str(_col(r, "tool_call_id") or ""),
+        "sid": str(_col(r, "session_id") or ""),
+        "turnId": _col(r, "turn_id"),
+        "parentSid": parent_sid,
+        "kind": "subagent",
+        "isSubagent": True,
+        "model": "",
+        "thinking": False,
+        "status": _col(r, "status") or "",
+        "startedAt": _col(r, "started_at"),
+        "firstTokenAt": None,
+        "completedAt": _col(r, "completed_at"),
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "subagentType": meta.get("type"),
+        "task": meta.get("task"),
+        "childSessionId": meta.get("child"),
     }
 
 
@@ -1209,22 +1366,48 @@ def _model_row_cols(con):
        m.reasoning_tokens, m.cache_read_input_tokens, m.cache_creation_input_tokens"""
 
 
+def _subagent_rows_of(con, sid, tools):
+    """父会话的 kind='subagent' 行：一条 Agent 工具行一条记录，task / type / 子会话
+    取自 _sub_agent_tasks 的同一次 part 扫描（不新增第三次扫描）。part 缺失或解析失败
+    只丢名字，条目照出；同一 callID 的重试行只取最新一条。"""
+    try:
+        idx = _sub_agent_tasks(con, sid)
+    except sqlite3.Error:
+        idx = {}   # part/session 表缺失：任务名与子会话降级为空，条目本身仍可用
+    calls = idx.get("calls") or {}
+    child_of = {m.get("call"): c for c, m in (idx.get("children") or {}).items() if m.get("call")}
+    rows, seen = [], set()
+    for t in tools:
+        call = str(_col(t, "tool_call_id") or "")
+        if call in seen:
+            continue
+        seen.add(call)
+        meta = dict(calls.get(call) or {})
+        if (_col(t, "status") or "") != "running":
+            meta["child"] = child_of.get(call)
+        rows.append(_subagent_contract_row(t, sid, meta))
+    return rows
+
+
 def _project_request_rows(con, sids, cap=_ROWS_CAP):
     """把请求指定的会话投影为 CONTRACT §4.3 请求行（recent 键；注入内核 aggregate 缝）。
     范围（模块头注释「投影范围」同款，R10 宁可少算不可串数）：
       * 主会话：main_turn/无标记的 model 行 + 全部 tool_usage 行（含 running，步数口径只
         认 completed，running 行供消费方自行取舍）；
       * 子代理：子会话（parent_id 指向请求会话）的 model 行，isSubagent=true；
+        父会话的 Agent 工具行另出一行 kind='subagent'（运行中条目的唯一存在性证据）；
       * 辅助 query_source（session_title 等）与子代理工具行不投影——混入会污染主口径。
     排序按完成时间升序（聚合端按 completedAt 排趋势）；单查询与总量各限 cap 行
     （超长会话取最近，防 JSON 体量失控击穿内核 8MB stdout 护栏）。
-    turn_id：列存在才投影（旧库/瘦身夹具可能没有该列），缺列时行带 turnId=None，
-    聚合端按「独立一轮」兜底，不影响其余字段。"""
+    turn_id / tool_call_id：列存在才投影（旧库/瘦身夹具可能没有），缺列时对应字段为
+    null，聚合端按既有兜底路径处理，不影响其余字段。"""
     if not sids:
         return []
     qm = ",".join("?" * len(sids))
-    has_tool_turn = _has_column(con, "tool_usage", "turn_id")
-    tool_turn_col = "t.turn_id" if has_tool_turn else "NULL as turn_id"
+    tool_turn_col = ("t.turn_id" if _has_column(con, "tool_usage", "turn_id")
+                     else "NULL as turn_id")
+    tool_call_col = ("t.tool_call_id" if _has_column(con, "tool_usage", "tool_call_id")
+                     else "NULL as tool_call_id")
     model_cols = _model_row_cols(con)
     rows = []
     # 主会话 model 行（辅助 query_source 不投影）
@@ -1236,23 +1419,32 @@ def _project_request_rows(con, sids, cap=_ROWS_CAP):
         (*sids, cap),
     ):
         rows.append(_model_contract_row(r))
-    # 子代理 model 行（isSubagent=true；子会话由 session.parent_id 关联）
+    # 子代理 model 行（isSubagent=true；子会话由 session.parent_id 关联，并带出父会话 id）
     for r in con.execute(
-        f"""select {model_cols}
-            from model_usage m where m.query_source='subagent'
-              and m.session_id in (select id from session where parent_id in ({qm}))
+        f"""select {model_cols}, s2.parent_id as parent_sid
+            from model_usage m join session s2 on m.session_id = s2.id
+            where m.query_source='subagent' and s2.parent_id in ({qm})
             order by coalesce(m.completed_at, m.started_at) desc limit ?""",
         (*sids, cap),
     ):
-        rows.append(_model_contract_row(r))
-    # 主会话工具行（kind='tool'）
+        rows.append(_model_contract_row(r, _col(r, "parent_sid")))
+    # 工具行：kind='tool' 全量投影；Agent 行另出一行 kind='subagent'
+    agent_of = {}
     for r in con.execute(
-        f"""select t.id, t.session_id, {tool_turn_col}, t.tool_name, t.status, t.started_at, t.completed_at
+        f"""select t.id, t.session_id, {tool_turn_col}, t.tool_name, t.status,
+                   t.started_at, t.completed_at, {tool_call_col}
             from tool_usage t where t.session_id in ({qm})
             order by coalesce(t.completed_at, t.started_at) desc limit ?""",
         (*sids, cap),
     ):
         rows.append(_tool_contract_row(r))
+        if ((_col(r, "tool_name") or "") == "Agent"
+                and (_col(r, "status") or "") in _SUBAGENT_STATUSES
+                and _col(r, "tool_call_id")):
+            agent_of.setdefault(str(_col(r, "session_id") or ""), []).append(r)
+    # Agent 工具行 → kind='subagent'（运行中 / 已结束同一形状；子代理 token 仍走 model 行）
+    for sid, tools in agent_of.items():
+        rows.extend(_subagent_rows_of(con, sid, tools))
 
     def sort_key(row):
         t = row["completedAt"] if row["completedAt"] is not None else row["startedAt"]

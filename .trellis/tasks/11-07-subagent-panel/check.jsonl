@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/testing.md", "reason": "跨层测试约定：Python unittest + node:test、临时目录铁律、断言口径"}
+{"file": "tests/data_zusage_snapshot.py", "reason": "投影层固定键集合严格相等断言，新增 parentSid 必须同步此文件"}
+{"file": "tests/stats-session.test.cjs", "reason": "聚合层既有断言：主口径数值与 subagent 双态，新增 list 不得改动这些数值"}
+{"file": "tests/statusbar-usage.test.cjs", "reason": "UI 冒烟 vm DOM stub 复用模板；用量弹层删除子代理段后此测试需跟着改"}
+{"file": "tests/core_bridge_shim.test.cjs", "reason": "内核缝测试：分桶键改动后需确认覆盖并按需补断言"}

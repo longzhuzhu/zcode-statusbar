@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/statusbar/ui-guidelines.md", "reason": "检查项：DOM 只增不改宿主、图标走内联 SVG 表、命名空间纪律"}
+{"file": ".trellis/spec/testing.md", "reason": "测试写法：node:test + vm DOM stub，断言行为不锁实现"}

@@ -9,8 +9,11 @@
  * 口径（prd R2 / R5 / design §2）：
  * - 完成态速度 = Σ输出 token ÷ Σ生成时长（"会话均"），仅统计主会话完成请求，不含子代理。
  * - 有效生成窗口：200ms ≤ 窗 < 1h。
- * - 思考请求或 Claude 模型用 started_at 窗（completed_at − started_at）；
- *   其余用首字窗（completed_at − first_token_at，缺首字时间时退 started_at）。
+ * - 生成时长一律取 completed_at − started_at（整段请求跨度）。不按 first_token_at 缩窗：
+ *   宿主该列由流式事件时间戳得出，而该时间戳在写队列 flush 时才赋值，实测落在请求跨度的
+ *   97%–100% 处（1501 条请求中 632 条的首字窗不足 30ms）。按它缩窗会把 50 tok/s 的请求算成
+ *   上万 tok/s，速度趋势因此虚高到 5927 这种量级。思考请求与 Claude 系原先也走同一口径，
+ *   现统一，windowBasis 判定随之删除。
  * - 总 token = input + output；缓存 token（cache_read/cache_write）已含在 input 中，绝不重复相加。
  * - 缓存命中率 = Σcache_read ÷ Σinput。
  * - 子代理单独聚合：活跃数、活跃速度、会话累计 token；不计入主口径任何字段。
@@ -71,34 +74,16 @@ function countTurns(rows) {
 }
 
 /**
- * 口径判定：该行生成窗口以哪端为起点（独立小函数，便于单测）。
- * 思考请求（row.thinking === true）或 Claude 系模型 → 'started_at'；其余 → 'first_token'。
- */
-function windowBasis(row) {
-  if (row && row.thinking === true) return 'started_at';
-  if (row && typeof row.model === 'string' && /claude/i.test(row.model)) return 'started_at';
-  return 'first_token';
-}
-
-/**
- * 单行生成窗口时长（ms）。
- * 思考/Claude：completed_at − started_at；其余：completed_at − first_token_at（缺首字退 started_at）。
- * 任一时间缺失或 end < 起点 → null（该行不参与速度口径）。
+ * 单行生成窗口时长（ms）= completed_at − started_at，即整段请求跨度。
+ * 不按 first_token_at 缩窗（原因见文件头口径说明）。
+ * 任一时间缺失或 end < started → null（该行不参与速度口径）。
  */
 function rowWindowMs(row) {
   if (!row || typeof row !== 'object') return null;
   const end = num(row.completedAt);
-  if (end == null) return null;
   const started = num(row.startedAt);
-  const first = num(row.firstTokenAt);
-  let from;
-  if (windowBasis(row) === 'started_at') {
-    from = started;
-  } else {
-    from = first != null ? first : started;
-  }
-  if (from == null) return null;
-  const ms = end - from;
+  if (end == null || started == null) return null;
+  const ms = end - started;
   return ms >= 0 ? ms : null;
 }
 
@@ -156,11 +141,26 @@ function buildSubagentList(rows, now) {
   }
 
   // 第一遍：投影行给出存在性、任务名、状态
+  // 两条投影行指向同一子会话（同一 Agent 重试 / 回执重复）时合并成一条：
+  // 否则列表出现两行同 key，点第二行详情会显示第一行的数据。
+  let projSeq = 0;
   for (const r of rows) {
     if (!r || typeof r !== 'object' || r.kind !== 'subagent') continue;
     const child = typeof r.childSessionId === 'string' ? r.childSessionId : null;
     const callId = r.id != null ? String(r.id) : null;
-    const item = blank(child || callId || '', child, callId);
+    const dup = child ? byChild.get(child) : null;
+    if (dup) {
+      // 状态取更"活跃"的一侧：任一侧还在跑就是运行中
+      if (normalizeSubStatus(r.status) === 'running') {
+        dup.status = 'running';
+        dup.endedAt = null;
+      }
+      const s = num(r.startedAt);
+      if (s != null && (dup.startedAt == null || s < dup.startedAt)) dup.startedAt = s;
+      continue;
+    }
+    // key 必须唯一：投影行理论上都有 call id，缺了就用序号兜底，避免多行同键
+    const item = blank(child || callId || ('sub:' + (projSeq += 1)), child, callId);
     item.type = typeof r.subagentType === 'string' && r.subagentType ? r.subagentType : null;
     item.task = typeof r.task === 'string' && r.task ? r.task : null;
     item.status = normalizeSubStatus(r.status);
@@ -179,7 +179,9 @@ function buildSubagentList(rows, now) {
     const child = typeof r.sid === 'string' ? r.sid : null;
     let target = child ? byChild.get(child) : null;
     if (!target) {
-      target = blank(child || '', child, null);
+      // 孤儿：有 token 但父会话的 Agent 工具行没解析出对应子会话（回执缺 agentId 且
+      // 标题前缀对不上）。key 必须唯一，否则多条孤儿挤在空键上、点详情互相串。
+      target = blank(child || ('orphan:' + r.id), child, null);
       target.status = normalizeSubStatus(r.status);
       if (child) byChild.set(child, target);
       items.push(target);
@@ -386,7 +388,6 @@ module.exports = {
   aggregate,
   buildSubagentList,
   // 口径小函数（测试与内核对齐用）
-  windowBasis,
   rowWindowMs,
   isCountedWindow,
   isSubagent,

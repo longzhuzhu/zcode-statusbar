@@ -2,8 +2,9 @@
 
 /**
  * statusbar.js 用量弹层冒烟（node:test + vm DOM stub）：
- * 加载 IIFE → 派发 session 事件（真实 session-stats.cjs aggregate 形状，含 tools）→
- * 点击 usage pill → 断言弹层含「工具调用」分组标题、合计行与每工具左右布局行，以及空态兜底。
+ * 加载 IIFE → 派发 session 事件（真实 session-stats.cjs aggregate 形状，含 tools + today 帧）→
+ * 点击 usage pill → 断言「用量」分组含缓存占比、「今日用量」分组含 token 总量与平均缓存率、
+ * 「工具调用」分组只剩每工具行（无合计行、无错误计数），以及空态兜底。
  * stub 只覆盖 IIFE 实际触达的宿主面：createElement/appendChild/insertBefore/addEventListener/
  * dispatchEvent/className/textContent/innerHTML/hidden/setAttribute/dataset/style/closest。
  * statusbar.js 全程 className 直赋、不用 classList，故未 stub classList。
@@ -171,52 +172,84 @@ function mountUsagePop(env) {
   return pop;
 }
 
-// 真实链路：session-stats.cjs aggregate() 产出的形状经内核 detail 包裹（{ aggregate }）喂给 session 事件
-function sessionDetail() {
+// 真实链路：session-stats.cjs aggregate() 产出的形状经内核 detail 包裹（{ aggregate, today }）喂给 session 事件
+function sessionDetail(today) {
   const { aggregate } = require('../statusbar/session-stats.cjs');
-  const tool = (over) =>
-    Object.assign(
-      {
-        id: 'r',
-        kind: 'tool',
-        isSubagent: false,
-        model: 'Bash',
-        thinking: false,
-        status: 'completed',
-        startedAt: 1000,
-        firstTokenAt: null,
-        completedAt: 2500,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-      },
-      over
-    );
-  return {
+  const base = {
+    id: 'r',
+    kind: 'tool',
+    isSubagent: false,
+    model: 'Bash',
+    thinking: false,
+    status: 'completed',
+    startedAt: 1000,
+    firstTokenAt: null,
+    completedAt: 2500,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  const tool = (over) => Object.assign({}, base, over);
+  const model = (over) => Object.assign({}, base, { id: 'm', kind: 'model' }, over);
+  const detail = {
     aggregate: aggregate([
+      model({ id: 'm1', startedAt: 1000, completedAt: 4000, inputTokens: 1000, outputTokens: 200, cacheReadTokens: 700 }),
       tool({ id: 't1', model: 'Bash', status: 'completed', startedAt: 1000, completedAt: 2500 }),
       tool({ id: 't2', model: 'Bash', status: 'error', startedAt: 3000, completedAt: 3600 }),
       tool({ id: 't3', model: 'Read', status: 'completed', startedAt: 1000, completedAt: 1500 }),
     ]),
   };
+  if (today !== undefined) detail.today = today;
+  return detail;
 }
 
-test('用量弹层出现独立「工具调用」分组：合计行 + 每工具左右布局行', () => {
+function mountWithDetail(detail) {
   const env = loadStatusbar();
-  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:session', { detail: sessionDetail() }));
+  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:session', { detail }));
+  return mountUsagePop(env);
+}
 
-  const pop = mountUsagePop(env);
-  assert.equal(pop.hidden, false, '点击 usage 后弹层打开');
+test('「用量」分组底部给出缓存占比', () => {
+  const pop = mountWithDetail(sessionDetail());
+
+  const text = fullText(pop);
+  assert.ok(text.includes('输入'), '输入分项渲染');
+  assert.ok(text.includes('缓存读'), '缓存读分项渲染');
+  assert.ok(text.includes('缓存占比'), '缓存占比标签渲染');
+  assert.ok(text.includes('70%'), '缓存占比 = cacheRead 700 ÷ input 1000');
+});
+
+test('「今日用量」分组给出 token 总用量与平均缓存率', () => {
+  const pop = mountWithDetail(
+    sessionDetail({ input: 3000, output: 500, cache_read: 1800, cache_write: 0 })
+  );
+
+  const text = fullText(pop);
+  assert.ok(text.includes('今日用量'), '今日分组标题渲染');
+  assert.ok(text.includes('token 总用量'), '总用量标签渲染');
+  assert.ok(text.includes('3.5K'), '总用量 = input 3000 + output 500');
+  assert.ok(text.includes('平均缓存率'), '平均缓存率标签渲染');
+  assert.ok(text.includes('60%'), '平均缓存率 = cache_read 1800 ÷ input 3000');
+});
+
+test('帧缺 today 块时「今日用量」整组不渲染', () => {
+  const pop = mountWithDetail(sessionDetail());
+
+  assert.ok(!fullText(pop).includes('今日用量'), '无今日数据不留空壳分组');
+});
+
+test('「工具调用」分组只有每工具行：无合计行、无错误计数', () => {
+  const pop = mountWithDetail(sessionDetail());
 
   const text = fullText(pop);
   assert.ok(text.includes('工具调用'), '分组标题渲染');
-  assert.ok(text.includes('合计'), '合计行渲染');
-  assert.ok(text.includes('3次 · 错误 1'), '合计 = total3 + 错误1');
+  assert.ok(!text.includes('合计'), '合计行已删除');
+  assert.ok(!text.includes('错误'), '错误计数已删除');
   assert.ok(text.includes('Bash'), '工具名渲染');
-  assert.ok(text.includes('2次 · 2.10s · 错误 1'), '工具行 = 次数 + 时长 + 错误');
+  assert.ok(text.includes('2次 · 2.10s'), '工具行 = 次数 + 时长（error 行时长仍计入）');
   assert.ok(text.includes('Read'), '第二个工具名渲染');
-  assert.ok(text.includes('1次 · 500ms'), '错误为 0 时省略错误段');
+  assert.ok(text.includes('1次 · 500ms'), '第二行读数');
 });
 
 test('无 tools 数据时「工具调用」分组显示空态兜底', () => {

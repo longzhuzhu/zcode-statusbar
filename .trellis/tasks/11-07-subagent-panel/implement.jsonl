@@ -1,0 +1,8 @@
+{"file": "statusbar/CONTRACT.md", "reason": "模块间契约唯一权威：§4.2 subagent 形状、§4.3 行键、§7 pill 与持久化键均在本轮改动范围内"}
+{"file": ".trellis/spec/statusbar/ui-guidelines.md", "reason": "防串数 R10、契约先行与偏差登记、静默降级链、命名空间纪律"}
+{"file": ".trellis/spec/data/data-guidelines.md", "reason": "只读 SQLite 边界、口径单源、_ROWS_CAP 上限与缓存护栏，投影层加 parentSid 与运行中 Agent 行须遵守"}
+{"file": ".trellis/spec/kernel/cjs-guidelines.md", "reason": "内核 cjs 侧：注入安全、Node↔Python 协议、测试接缝；本轮改 inject-main.cjs 分桶键"}
+{"file": "zusage.py", "reason": "投影层正本：_project_request_rows / _sub_agent_tasks / snapshot 结构，parentSid 与运行中条目的落点"}
+{"file": "statusbar/session-stats.cjs", "reason": "聚合层正本：subagent 字段与主口径不变约束的实现位置"}
+{"file": "core/inject-main.cjs", "reason": "内核聚合缝：按 sid 分桶导致子代理行落空的根因位置（530-560）"}
+{"file": "statusbar/statusbar.js", "reason": "UI 正本：pill 点击绑定、面板与详情、可见性粘滞、呼吸灯 CSS 的落点"}

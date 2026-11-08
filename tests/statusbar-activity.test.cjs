@@ -70,7 +70,17 @@ function makeElement(tag) {
       (this.listeners[ev.type] || []).forEach((fn) => fn(ev));
       return true;
     },
-    querySelector() {
+    querySelector(sel) {
+      // 只支持类选择器：趋势图盒按 `.zsb-trend` 找，其余（[data-act="diag"] 等）返回 null。
+      // 与浏览器一致，从自身子树开始匹配，不查后代之外。
+      if (!sel || sel.charAt(0) !== '.') return null;
+      const want = sel.slice(1);
+      const stack = [...this.children];
+      while (stack.length) {
+        const node = stack.shift();
+        if ((node.className || '').split(/\s+/).includes(want)) return node;
+        stack.push(...(node.children || []));
+      }
       return null;
     },
     querySelectorAll() {
@@ -172,7 +182,7 @@ function mountActivityPop(env) {
 
 // 真实链路：aggregate() 产出 timing/speedTrend/sessionAvgTokPerSec，经 { aggregate } 包裹喂给 session 事件。
 // 主行设计：modelTime 635s → 10分35秒；ttft 9.5s → 9.5秒；
-// 首字窗 625.5s × 120 tok/s = 75060 输出 → TPS 恰为 120。
+// 生成窗 = completed − started = 635s，75060 输出 → TPS 约 118（整段跨度口径）。
 function sessionDetail() {
   const { aggregate } = require('../statusbar/session-stats.cjs');
   const main = (over) =>
@@ -219,8 +229,45 @@ test('活动弹层含「输出速度（TPS）」行与人类可读时长', () =>
   assert.ok(text.includes('首字延迟'), '首字延迟行渲染');
   assert.ok(text.includes('9.5秒'), '首字延迟为 X.X秒 格式');
   assert.ok(text.includes('输出速度（TPS）'), 'TPS 行渲染');
-  assert.ok(text.includes('120 tok/s'), 'TPS 数值与底部状态条同源（会话均口径）');
+  assert.ok(text.includes('118 tok/s'), 'TPS 数值与底部状态条同源（会话均口径）');
   assert.ok(text.includes('速度趋势'), '趋势区标题渲染');
+});
+
+test('趋势图渲染为平滑曲线：三次贝塞尔路径，无折线 polyline', () => {
+  const { aggregate } = require('../statusbar/session-stats.cjs');
+  const rows = [];
+  for (let i = 0; i < 6; i++) {
+    rows.push({
+      id: 'r' + i,
+      kind: 'model',
+      isSubagent: false,
+      model: 'glm-test',
+      thinking: false,
+      status: 'completed',
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      startedAt: i * 10_000,
+      firstTokenAt: i * 10_000 + 500,
+      completedAt: i * 10_000 + 5_000, // 窗恒 5s
+      outputTokens: [100, 900, 300, 700, 200, 500][i] * 5, // → 100/900/300/700/200/500 tok/s
+    });
+  }
+  const env = loadStatusbar();
+  env.window.dispatchEvent(
+    new env.window.CustomEvent('zcode-statusbar:session', { detail: { aggregate: aggregate(rows) } })
+  );
+  const pop = mountActivityPop(env);
+  const box = pop.querySelector('.zsb-trend');
+  assert.ok(box, '趋势图盒子存在');
+  const svg = box.innerHTML;
+  assert.ok(svg.includes('<svg'), 'SVG 已补画（layoutTrend 消费 pendingTrend）');
+  assert.ok(!svg.includes('<polyline'), '不再输出折线');
+  assert.ok(/ d="M[\d.]+,[\d.]+ C/.test(svg), '曲线路径由 M + C 段组成');
+  const strokes = svg.match(/<path d="[^"]+" fill="none"/g) || [];
+  assert.equal(strokes.length, 1, '描边只有一条曲线路径');
+  const circles = svg.match(/<circle /g) || [];
+  assert.equal(circles.length, 6, '每个样本仍有一个数据点');
 });
 
 test('无数据时 TPS 行显 --、趋势区空态兜底', () => {
