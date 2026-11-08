@@ -11,7 +11,6 @@ const assert = require('node:assert/strict');
 
 const {
   aggregate,
-  windowBasis,
   rowWindowMs,
   isCountedWindow,
   MIN_WINDOW_MS,
@@ -40,26 +39,18 @@ function row(over) {
   );
 }
 
-test('windowBasis：思考请求与 Claude 模型用 started_at 窗，其余用 first_token 窗', () => {
-  assert.equal(windowBasis(row({ thinking: true })), 'started_at');
-  assert.equal(windowBasis(row({ model: 'claude-sonnet-4' })), 'started_at');
-  assert.equal(windowBasis(row({ model: 'Claude' })), 'started_at'); // 不区分大小写
-  assert.equal(windowBasis(row({ model: 'glm-4.6' })), 'first_token');
-  assert.equal(windowBasis(row({ model: 'glm-4.6', thinking: false })), 'first_token');
-  assert.equal(windowBasis(null), 'first_token'); // 坏输入不抛错
-});
-
-test('rowWindowMs：首字窗与 started_at 窗；时间缺失/倒挂返回 null', () => {
-  // 普通行：completed(3000) − first_token(2000) = 1000ms
-  assert.equal(rowWindowMs(row()), 1000);
-  // 思考行：completed(3000) − started(1000) = 2000ms（首字时间被忽略）
-  assert.equal(rowWindowMs(row({ thinking: true, firstTokenAt: 2900 })), 2000);
-  // 普通行缺首字：退 started_at 窗
-  assert.equal(rowWindowMs(row({ firstTokenAt: null })), 2000);
+test('rowWindowMs：一律取 completed − started（整段生成跨度），首字时间不参与', () => {
+  // completed(3000) − started(1000) = 2000ms
+  assert.equal(rowWindowMs(row()), 2000);
+  // 首字紧贴完成时窗口不塌缩：宿主 first_token_at 会取到末段增量时间（实测位于真实
+  // 流式区间 97%–100% 处），按首字缩窗会把 100 tok/s 算成上万 tok/s
+  assert.equal(rowWindowMs(row({ firstTokenAt: 2900 })), 2000);
+  assert.equal(rowWindowMs(row({ firstTokenAt: null })), 2000); // 缺首字照常
+  assert.equal(rowWindowMs(row({ thinking: true, firstTokenAt: 2900 })), 2000); // 思考行同口径
   // 缺 completedAt / 缺 startedAt / 倒挂 → null
   assert.equal(rowWindowMs(row({ completedAt: null })), null);
   assert.equal(rowWindowMs(row({ startedAt: null, firstTokenAt: null })), null);
-  assert.equal(rowWindowMs(row({ firstTokenAt: 5000 })), null); // 首字晚于完成，倒挂
+  assert.equal(rowWindowMs(row({ completedAt: 500 })), null); // 完成早于开始，倒挂
 });
 
 test('isCountedWindow：200ms 含、199ms 排除、1h 排除、1h−1ms 含', () => {
@@ -73,12 +64,12 @@ test('isCountedWindow：200ms 含、199ms 排除、1h 排除、1h−1ms 含', ()
 
 test('完成态速度 = Σ输出 ÷ Σ有效生成时长；无效窗口行被剔除', () => {
   const rows = [
-    // first_token 窗 1000ms，out 300 → 300 tok/s
+    // 普通行：started(1000) → completed(3000) = 2000ms，out 300 → 150 tok/s
     row({ id: 'a', outputTokens: 300 }),
-    // thinking：started_at 窗 2000ms，out 200 → 100 tok/s
+    // thinking 行同口径：2000ms，out 200 → 100 tok/s
     row({ id: 'b', thinking: true, outputTokens: 200 }),
     // 窗口 150ms < 200ms → 剔除
-    row({ id: 'c', outputTokens: 999, firstTokenAt: 2850 }),
+    row({ id: 'c', outputTokens: 999, startedAt: 2850, firstTokenAt: 2850 }),
     // 窗口 2h ≥ 1h → 剔除
     row({ id: 'd', outputTokens: 999, startedAt: 0, firstTokenAt: 1000, completedAt: 7200 * 1000 }),
     // 运行中（未完成）→ 剔除
@@ -87,18 +78,18 @@ test('完成态速度 = Σ输出 ÷ Σ有效生成时长；无效窗口行被剔
     row({ id: 'f', status: 'error', outputTokens: 999 }),
   ];
   const agg = aggregate(rows);
-  // Σout = 500；Σwin = 1.0s + 2.0s = 3.0s → 166.67
-  assert.ok(Math.abs(agg.sessionAvgTokPerSec - 500 / 3) < 1e-9);
+  // Σout = 500；Σwin = 2.0s + 2.0s = 4.0s → 125
+  assert.ok(Math.abs(agg.sessionAvgTokPerSec - 500 / 4) < 1e-9);
 });
 
 test('子代理不计入主口径任何字段（R2：不含子代理）', () => {
   const rows = [
-    row({ id: 'main', outputTokens: 300 }), // 窗 1s
-    row({ id: 'sub1', isSubagent: true, outputTokens: 900, inputTokens: 1000 }), // 窗 1s
+    row({ id: 'main', outputTokens: 300 }), // 窗 2s → 150 tok/s
+    row({ id: 'sub1', isSubagent: true, outputTokens: 900, inputTokens: 1000 }), // 窗 2s
     row({ id: 'sub2', isSubagent: true, outputTokens: 900, inputTokens: 1000 }),
   ];
   const agg = aggregate(rows);
-  assert.ok(Math.abs(agg.sessionAvgTokPerSec - 300) < 1e-9); // 只算主行
+  assert.ok(Math.abs(agg.sessionAvgTokPerSec - 150) < 1e-9); // 只算主行
   assert.equal(agg.totalTokens, 300 + 100); // 子代理 token 不计入总 token
   assert.equal(agg.turns, 1); // 轮次只数主会话完成请求
   assert.equal(agg.subagent.sessionTokens, (900 + 1000) * 2);
@@ -147,7 +138,7 @@ test('无活跃子代理时 activeTokPerSec 为 null', () => {
   assert.equal(agg.subagent.activeTokPerSec, null);
 });
 
-test('speedTrend：按完成时间升序取最近 10 轮（R6 占位数据接口）', () => {
+test('speedTrend：按完成时间升序取最近 10 轮（R6）', () => {
   const rows = [];
   for (let i = 0; i < 15; i++) {
     rows.push(
@@ -155,16 +146,16 @@ test('speedTrend：按完成时间升序取最近 10 轮（R6 占位数据接口
         id: 't' + i,
         startedAt: i * 10_000,
         firstTokenAt: i * 10_000 + 100,
-        completedAt: i * 10_000 + 1100, // 窗 1s
-        outputTokens: 100 + i,
+        completedAt: i * 10_000 + 2000, // 窗 2s
+        outputTokens: 2 * (100 + i), // 窗 2s → 100+i tok/s
       })
     );
   }
   const agg = aggregate(rows);
   assert.equal(agg.speedTrend.length, 10);
   // 最近 10 轮 = t5..t14
-  assert.equal(agg.speedTrend[0].t, 5 * 10_000 + 1100);
-  assert.equal(agg.speedTrend[9].t, 14 * 10_000 + 1100);
+  assert.equal(agg.speedTrend[0].t, 5 * 10_000 + 2000);
+  assert.equal(agg.speedTrend[9].t, 14 * 10_000 + 2000);
   assert.ok(Math.abs(agg.speedTrend[9].tokPerSec - (100 + 14)) < 1e-9);
 });
 
@@ -431,4 +422,54 @@ test('轮次不含子代理：子代理行的 turnId 不参与主口径', () => 
     row({ id: 's2', turnId: 't9', isSubagent: true }),
   ]);
   assert.equal(agg.turns, 1, '子代理 turnId 一律不计');
+});
+
+// ---- subagent.list：key 唯一性（详情页按 key 定位，重复键会串数据）----
+
+test('subagent.list：指向同一子会话的两条投影行合并成一条（重试/重复回执）', () => {
+  const agg = aggregate(
+    [
+      subRow({ id: 'c1', status: 'completed', completedAt: 9000, childSessionId: 'sess_a', startedAt: 1000 }),
+      subRow({ id: 'c2', status: 'completed', completedAt: 9000, childSessionId: 'sess_a', startedAt: 1000 }),
+    ],
+    10_000
+  );
+  assert.equal(agg.subagent.list.length, 1);
+  assert.equal(agg.subagent.list[0].key, 'sess_a');
+});
+
+test('subagent.list：合并时任一行为运行中则整体算运行中', () => {
+  const agg = aggregate(
+    [
+      subRow({ id: 'c1', status: 'running', completedAt: null, childSessionId: 'sess_a' }),
+      subRow({ id: 'c2', status: 'completed', completedAt: 9000, childSessionId: 'sess_a' }),
+    ],
+    10_000
+  );
+  assert.equal(agg.subagent.list.length, 1);
+  assert.equal(agg.subagent.list[0].status, 'running');
+});
+
+test('subagent.list：所有行都缺 id 时 key 仍唯一', () => {
+  const agg = aggregate(
+    [subRow({ id: null, childSessionId: null }), subRow({ id: null, childSessionId: null })],
+    10_000
+  );
+  const keys = agg.subagent.list.map((i) => i.key);
+  assert.equal(keys.length, 2);
+  assert.equal(new Set(keys).size, 2, 'key 必须唯一，否则详情互串');
+});
+
+test('subagent.list：孤儿条目（有 token 无投影行）key 唯一且不与投影条目撞键', () => {
+  const agg = aggregate(
+    [
+      subRow({ id: 'p1', childSessionId: 'sess_a', status: 'completed', startedAt: 0, completedAt: 1000 }),
+      row({ id: 'm1', isSubagent: true, sid: 'sess_orphan_1', status: 'completed', outputTokens: 10 }),
+      row({ id: 'm2', isSubagent: true, sid: 'sess_orphan_2', status: 'completed', outputTokens: 20 }),
+    ],
+    10_000
+  );
+  const keys = agg.subagent.list.map((i) => i.key);
+  assert.equal(keys.length, 3);
+  assert.equal(new Set(keys).size, 3);
 });

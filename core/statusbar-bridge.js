@@ -159,6 +159,36 @@
     } catch (e) { return null; }
   }
 
+  /* 内嵌桥是按 scope 取 store 的元组（getState 返回宿主 state 原对象，深层字段仍受
+   * 宿主保护）。下方窄读取器只取需要的标量/枚举，避免为几个数字深拷贝整份会话快照。 */
+  function currentState() {
+    try {
+      var el = paneElement();
+      if (!el) return null;
+      var scope = buildScope(paneDataset(el));
+      if (!scope) {
+        var fiberInfo = fiberPaneScope(el);
+        scope = fiberInfo && buildScope(fiberInfo);
+      }
+      if (!scope) return null;
+      var store = embeddedStore(scope);
+      return store ? store.getState() : null;
+    } catch (e) { return null; }
+  }
+
+  /* breakdown 只留 (source, chars) 两个字段的浅副本：宿主对象不外流，consumer 无法写回。 */
+  function copyBreakdown(list) {
+    if (!Array.isArray(list)) return null;
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!item || typeof item.source !== "string") continue;
+      if (typeof item.chars !== "number" || !isFinite(item.chars) || item.chars <= 0) continue;
+      out.push({ source: item.source, chars: item.chars });
+    }
+    return out.length ? out : null;
+  }
+
   var bridge = {
     /** 当前窗口焦点 pane 的 id；不可确认返回 null（不猜测）。 */
     getPaneId: function () {
@@ -186,6 +216,19 @@
         if (!scope) return null;
         var store = embeddedStore(scope);
         return store ? store.getState() : null;
+      } catch (e) { return null; }
+    },
+    /** 上下文来源明细的窄投影：{ used, size, breakdown } | null。
+     * 只投影弹层要画的三样东西，不把整份会话快照搬到渲染端。 */
+    getContextBreakdown: function () {
+      try {
+        var st = currentState();
+        var usage = st && st.snapshot && st.snapshot.usage;
+        var cw = usage && usage.contextWindow;
+        if (!cw) return null;
+        var used = typeof cw.usedTokens === "number" && isFinite(cw.usedTokens) ? cw.usedTokens : null;
+        var size = typeof cw.maxTokens === "number" && isFinite(cw.maxTokens) ? cw.maxTokens : null;
+        return { used: used, size: size, breakdown: copyBreakdown(cw.breakdown) };
       } catch (e) { return null; }
     },
   };

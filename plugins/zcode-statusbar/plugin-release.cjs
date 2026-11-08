@@ -16,6 +16,10 @@ const { execFile } = require("child_process");
 
 const PLUGIN_ID = "zcode-statusbar@zcode-statusbar-marketplace";
 const MARKETPLACE_NAME = "zcode-statusbar-marketplace";
+// 本地目录/官方市场安装的 marketplace 注册名（仓库 marketplace.json 的 name）；
+// readChannel 须同时识别 Release 布局与本地布局两种注册名。
+const LOCAL_MARKETPLACE_NAME = "zcode-statusbar";
+const MARKETPLACE_NAMES = [MARKETPLACE_NAME, LOCAL_MARKETPLACE_NAME];
 const PLUGIN_NAME = "zcode-statusbar";
 const PLUGIN_ZIP_PREFIX = "plugins/" + PLUGIN_NAME;
 const STABLE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -62,10 +66,14 @@ function sameAssetUrl(actual, expected) {
 }
 function readCatalog(root) {
   // 市场缓存清单只用来识别“源码清单”这一形态；事务进行中、缺失或损坏时按未知处理，
-  // 由后续 Release 流程报出准确原因。
+  // 由后续 Release 流程报出准确原因。注册名随安装来源布局不同，逐个探测。
   try {
-    if (fs.existsSync(path.join(root, "marketplaces", "." + MARKETPLACE_NAME + ".marketplace.transaction.json"))) return null;
-    return JSON.parse(fs.readFileSync(path.join(root, "marketplaces", MARKETPLACE_NAME, "marketplace.json"), "utf8"));
+    for (const name of MARKETPLACE_NAMES) {
+      if (fs.existsSync(path.join(root, "marketplaces", "." + name + ".marketplace.transaction.json"))) return null;
+      const file = path.join(root, "marketplaces", name, "marketplace.json");
+      if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8"));
+    }
+    return null;
   } catch (e) { return null; }
 }
 function readChannel(home, root = require("./plugin-storage.cjs").resolvePluginStorage(home)) {
@@ -73,7 +81,7 @@ function readChannel(home, root = require("./plugin-storage.cjs").resolvePluginS
   const data = JSON.parse(fs.readFileSync(file, "utf8"));
   const entries = data && data.marketplaces;
   if (!Array.isArray(entries)) throw new Error("插件市场来源记录无效");
-  const matches = entries.filter((m) => m && (m.id === MARKETPLACE_NAME || m.name === MARKETPLACE_NAME));
+  const matches = entries.filter((m) => m && (MARKETPLACE_NAMES.includes(m.id) || MARKETPLACE_NAMES.includes(m.name)));
   const market = matches.length === 1 ? matches[0] : null;
   if (!market || !market.source || typeof market.source !== "object") throw new Error(`未找到 ${MARKETPLACE_NAME} 的注册来源`);
   const source = market.source;

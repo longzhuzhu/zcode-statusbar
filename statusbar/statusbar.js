@@ -98,7 +98,7 @@
     verifiedTip: '会话均：Σ输出 token ÷ Σ生成时长',
     usageTip: '累计 token 与缓存命中率（缓存已含在输入）',
     contextTip: '上下文占用：与官方面板同源，分母为完整 context window',
-    subRunningTip: '子代理运行中：活跃数 · 速度',
+    subRunningTip: '子代理运行中 · 实时速度',
     subIdleTip: '子代理会话累计 token',
     gearTip: '状态条设置',
     noData: '暂无数据',
@@ -114,11 +114,30 @@
     outputTok: '输出',
     cacheRead: '缓存读',
     cacheWrite: '缓存写',
+    cacheShare: '缓存占比',
+    todayTitle: '今日用量',
+    todayTokens: 'token 总用量',
+    todayCacheRate: '平均缓存率',
     toolsTitle: '工具调用',
-    toolsTotal: '合计',
     toolCallsUnit: '次',
-    toolErrors: '错误',
     subagents: '子代理明细',
+    subRunning: '运行中',
+    subDone: '已完成',
+    subBack: '返回',
+    subUnnamed: '子代理',
+    subStatus: '状态',
+    subTask: '任务',
+    subStarted: '开始时间',
+    subDuration: '耗时',
+    subRequests: '请求数',
+    subInput: '输入',
+    subOutput: '输出',
+    subCache: '缓存读 / 写',
+    subTps: '平均速度',
+    subStRunning: '运行中',
+    subStDone: '已完成',
+    subStError: '失败',
+    subStCancelled: '已取消',
     ctxUsed: '已用',
     ctxTotal: '总量',
     ctxPercent: '占比',
@@ -157,9 +176,12 @@
     paneId: null,
     turn: null, // { tokPerSec, estimated, updatedAt }
     session: null, // session-stats.cjs aggregate() 输出
+    today: null, // 内核帧的 today 块（全库今日 completed 行）；与 session 口径不同，单独存
     sessionAt: 0, // 最近一次 session 数据到达时间（诊断用）
     context: null, // { used, size } 上下文占用（读宿主隐藏锚点，诊断用）
     breakdown: null, // [{ source, chars }] 上下文来源明细（弹层打开时读一次，见 readContextBreakdown）
+    subSeen: false, // 本会话是否出现过子代理：出现过就一直显示 pill，换会话重置（防串数）
+    sessionOwner: null, // 当前会话 id（来自内核 detail.mine）：判定"换会话"的唯一依据
     lastError: null,
     visible: { activity: true, usage: true, context: true, subagent: true, gear: true },
   };
@@ -217,6 +239,11 @@
     return Math.round(rate * 100) + '%';
   }
 
+  // 有限数值读取：非有限值一律视为缺失（null），与 session-stats.cjs 的 num() 同口径
+  function finNum(v) {
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  }
+
   // 来源占比：≥10% 取整（避免长条上的抖动），小份额保留一位小数（0.4% 不吃成 0%）
   function fmtShare(rate) {
     if (typeof rate !== 'number' || !isFinite(rate)) return '--';
@@ -269,6 +296,7 @@
     'flex:none;white-space:nowrap;}',
     // 窄容器降级阶梯：data-fit 为空格分隔的档位集合（"1 2"=已启用前两档），由 fitBar 按
     // 实测可用宽度逐档抬高（不是媒体查询——状态条容器宽度与窗口宽度无关）。
+    // 档位按价值序编号，与 pill 的视觉顺序（Activity → Usage → 子代理 → 上下文 → 齿轮）解耦。
     // 价值序（先让位的是最可牺牲的）：缓存命中（派生指标，长期稳定） < 闲置子代理统计
     // < 轮·步读数 < 用量总量 < 运行中子代理 < 速度单位 < 上下文百分比。
     // 上下文圆环与齿轮任何档位都不隐（R4）；读数在各弹层内始终完整可查。
@@ -291,6 +319,31 @@
     '.zsb-num{font-variant-numeric:tabular-nums;}',
     '.zsb-est{animation:zsb-breathe 2s ease-in-out infinite;}',
     '@keyframes zsb-breathe{0%,100%{opacity:1}50%{opacity:.55}}',
+    // 运行中子代理呼吸灯：周期/振幅对齐原插件 zupulse。zsb-est 标记估算值，两者语义不同。
+    '.zsb-pulse{animation:zsb-pulse 1.6s ease-in-out infinite;}',
+    '@keyframes zsb-pulse{0%,100%{opacity:1}50%{opacity:.2}}',
+    '@media (prefers-reduced-motion:reduce){.zsb-pulse{animation:none;opacity:.8}}',
+    // 运行态绿点：只表达"有子代理在跑"，不参与速度语义（速度仍由色阶表达）。
+    // 颜色经 --zsb-live 按深浅主题取值（#3ecf8e / #0c8a63，取自原插件 zupulse）。
+    '.zsb-livedot{width:6px;height:6px;border-radius:999px;flex:none;background:var(--zsb-live,#3ecf8e);}',
+    '.zsb-livedot.zsb-pulse{animation:zsb-pulse 1.6s ease-in-out infinite;}',
+    // 子代理面板：分组 + 每行「状态点 类型 任务 →」。省略号统一给中间的任务列，
+    // 类型与箭头固定在两端，行宽不随任务文本跳动。
+    '.zsb-subgroup{margin-top:10px;}',
+    '.zsb-subgroup:first-child{margin-top:0;}',
+    '.zsb-subrow{display:flex;align-items:center;gap:6px;line-height:24px;padding:1px 4px;border-radius:6px;',
+    'border:0;background:transparent;color:inherit;font:inherit;font-size:inherit;text-align:left;',
+    'width:100%;cursor:pointer;font-variant-numeric:tabular-nums;}',
+    '.zsb-subrow:hover{background:color-mix(in srgb,currentColor 10%,transparent);}',
+    '.zsb-subdot{width:6px;height:6px;border-radius:999px;flex:none;background:currentColor;opacity:.75;}',
+    // 面板内运行中行：状态点用同一绿色（静止，呼吸只留在条上，避免多点同闪）
+    '.zsb-subdot.zsb-live{background:var(--zsb-live,#3ecf8e);opacity:1;}',
+    '.zsb-subrow .nm{flex:none;max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.zsb-subrow .tk{flex:1;min-width:0;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.zsb-subrow .go{flex:none;opacity:.5;}',
+    '.zsb-back{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;color:inherit;',
+    'font:inherit;font-size:inherit;cursor:pointer;padding:0 4px 6px 0;border-radius:6px;opacity:.8;}',
+    '.zsb-back:hover{opacity:1;}',
     '.zsb-ring-fill{transition:stroke-dasharray .3s ease,stroke .3s ease;}',
     '.zsb-ctxbar{height:4px;border-radius:999px;margin-top:10px;overflow:hidden;display:flex;gap:1px;',
     'background:color-mix(in srgb,currentColor 16%,transparent);}',
@@ -387,25 +440,36 @@
     root.style.setProperty('--zsb-ctx-system', dark ? 'rgb(173,178,184)' : 'rgb(129,133,140)');
     root.style.setProperty('--zsb-ctx-tools', '#a78bfa');
     root.style.setProperty('--zsb-ctx-messages', dark ? 'rgb(77,147,248)' : 'rgb(59,130,246)');
+    // 子代理运行态绿点（原插件 zupulse 同色）：深色提亮，浅色压深保证白底可辨
+    root.style.setProperty('--zsb-live', dark ? '#3ecf8e' : '#0c8a63');
   }
 
   // ================= 图标（内联 SVG，14×14，描边继承 currentColor） =================
+  // activity / usage / gear 的路径数据取自 deepseek-harness 的 ui-primitives 图标表
+  // （packages/client/ui-primitives/src/icons/artwork.ts，MIT，Copyright (c) 2026 DeepSeek）。
+  // 画布是 viewBox 16，渲染到 14px 时缩放 0.875，故 stroke-width 写 1.6（生效 1.4px），
+  // 与自绘子代理图标（viewBox 14 / 1.4）字重一致。子代理保留自绘三分叉，不用人形头像。
 
   var ICONS = {
     activity:
-      '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<path d="M2 8a5 5 0 0 1 10 0"/><path d="M7 8 9.4 5.2"/><circle cx="7" cy="8" r="0.9" fill="currentColor" stroke="none"/></svg>',
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M3.4041 13.096C2.49514 12.187 1.87614 11.0288 1.62537 9.76798C1.37459 8.50716 1.50331 7.20028 1.99525 6.01261C2.48719 4.82494 3.32025 3.80981 4.3891 3.09557C5.45795 2.38134 6.71458 2.00008 8.0001 2C9.28563 2.00008 10.5423 2.38134 11.6111 3.09557C12.68 3.80981 13.513 4.82494 14.005 6.01261C14.4969 7.20028 14.6256 8.50716 14.3748 9.76798C14.1241 11.0288 13.5051 12.187 12.5961 13.096"/>' +
+      '<path d="M8 8.49994L11.6114 4.88855"/>' +
+      '<path d="M8 9.75C8.69036 9.75 9.25 9.19036 9.25 8.5C9.25 7.80964 8.69036 7.25 8 7.25C7.30964 7.25 6.75 7.80964 6.75 8.5C6.75 9.19036 7.30964 9.75 8 9.75Z" fill="currentColor"/></svg>',
     usage:
-      '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<ellipse cx="7" cy="3.2" rx="4.6" ry="1.7"/><path d="M2.4 3.2v7.6c0 .94 2.06 1.7 4.6 1.7s4.6-.76 4.6-1.7V3.2"/><path d="M2.4 7c0 .94 2.06 1.7 4.6 1.7S11.6 7.94 11.6 7"/></svg>',
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M13.1967 5.1869C13.7232 4.77378 14.0003 4.30517 14.0001 3.82819C14.0003 3.3512 13.7232 2.88259 13.1967 2.46947C12.6702 2.05635 11.9128 1.71328 11.0006 1.47475C10.0885 1.23621 9.05371 1.11062 8.00039 1.1106C6.94707 1.11057 5.9123 1.23612 5.00009 1.47461C4.08742 1.71301 3.32948 2.05604 2.80249 2.46919C2.2755 2.88235 1.99805 3.35106 1.99805 3.82819C1.99805 4.30531 2.2755 4.77402 2.80249 5.18718C3.32948 5.60033 4.08742 5.94336 5.00009 6.18176C5.9123 6.42025 6.94707 6.5458 8.00039 6.54578C9.05371 6.54575 10.0885 6.42016 11.0006 6.18163C11.9128 5.94309 12.6702 5.60002 13.1967 5.1869Z"/>' +
+      '<path d="M2 3.80371V11.7848"/><path d="M14 3.80371V11.7848"/>' +
+      '<path d="M2 7.81396C2 8.60524 2.63214 9.36411 3.75736 9.92363C4.88258 10.4832 6.4087 10.7975 8 10.7975C9.5913 10.7975 11.1174 10.4832 12.2426 9.92363C13.3679 9.36411 14 8.60524 14 7.81396"/>' +
+      '<path d="M2 11.7847C2 12.6081 2.63214 13.3977 3.75736 13.98C4.88258 14.5622 6.4087 14.8893 8 14.8893C9.5913 14.8893 11.1174 14.5622 12.2426 13.98C13.3679 13.3977 14 12.6081 14 11.7847"/></svg>',
     subagent:
       '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
       '<circle cx="7" cy="2.8" r="1.8"/><circle cx="2.8" cy="11" r="1.8"/><circle cx="11.2" cy="11" r="1.8"/>' +
       '<path d="M7 4.6v3M7 7.6 3.6 9.5M7 7.6l3.4 1.9"/></svg>',
     gear:
-      '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<path d="M5.86 1.11L8.14 1.11L7.83 2.73L9.43 3.39L10.36 2.03L11.97 3.64L10.61 4.57L11.27 6.17L12.89 5.86L12.89 8.14L11.27 7.83L10.61 9.43L11.97 10.36L10.36 11.97L9.43 10.61L7.83 11.27L8.14 12.89L5.86 12.89L6.17 11.27L4.57 10.61L3.64 11.97L2.03 10.36L3.39 9.43L2.73 7.83L1.11 8.14L1.11 5.86L2.73 6.17L3.39 4.57L2.03 3.64L3.64 2.03L4.57 3.39L6.17 2.73Z"/>' +
-      '<circle cx="7" cy="7" r="2.15"/></svg>',
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M8 9.75012C8.9665 9.75012 9.75 8.96662 9.75 8.00012C9.75 7.03362 8.9665 6.25012 8 6.25012C7.0335 6.25012 6.25 7.03362 6.25 8.00012C6.25 8.96662 7.0335 9.75012 8 9.75012Z"/>' +
+      '<path d="M13.0107 7.79377C12.9505 7.89401 12.9205 7.94413 12.9205 7.99951C12.9205 8.0549 12.9505 8.10502 13.0106 8.20528L13.9849 9.83006C14.045 9.93029 14.0751 9.9804 14.0751 10.0358C14.0751 10.0911 14.045 10.1413 13.9849 10.2415L13.0037 11.8777C12.9468 11.9726 12.9184 12.0201 12.8725 12.0461C12.8267 12.072 12.7713 12.072 12.6607 12.072H10.6704C10.5598 12.072 10.5045 12.072 10.4586 12.098C10.4128 12.1239 10.3843 12.1714 10.3274 12.2662L9.33825 13.9142C9.28133 14.009 9.25287 14.0564 9.20703 14.0823C9.16118 14.1083 9.10588 14.1083 8.99529 14.1083H7.00486C6.89426 14.1083 6.83896 14.1083 6.79312 14.0823C6.74727 14.0564 6.71881 14.009 6.6619 13.9142L5.67273 12.2662C5.61581 12.1714 5.58735 12.1239 5.54151 12.098C5.49566 12.072 5.44036 12.072 5.32977 12.072H3.33945C3.2288 12.072 3.17347 12.072 3.12761 12.0461C3.08176 12.0201 3.0533 11.9726 2.9964 11.8777L2.0152 10.2415C1.9551 10.1413 1.92505 10.0911 1.92505 10.0358C1.92505 9.9804 1.9551 9.93029 2.0152 9.83006L2.98951 8.20528C3.04963 8.10502 3.07969 8.0549 3.07969 7.99951C3.07968 7.94413 3.04961 7.89401 2.98946 7.79377L2.01529 6.17011C1.95514 6.06987 1.92507 6.01975 1.92507 5.96437C1.92506 5.90899 1.95512 5.85886 2.01524 5.7586L2.9964 4.1224C3.0533 4.0275 3.08176 3.98005 3.12761 3.95408C3.17347 3.92811 3.2288 3.92811 3.33945 3.92811H5.32977C5.44036 3.92811 5.49566 3.92811 5.54151 3.90216C5.58735 3.87621 5.61581 3.82879 5.67273 3.73397L6.6619 2.08599C6.71881 1.99116 6.74727 1.94375 6.79312 1.9178C6.83896 1.89185 6.89426 1.89185 7.00486 1.89185H8.99529C9.10588 1.89185 9.16118 1.89185 9.20703 1.9178C9.25287 1.94375 9.28133 1.99116 9.33825 2.08599L10.3274 3.73397C10.3843 3.82879 10.4128 3.87621 10.4586 3.90216C10.5045 3.92811 10.5598 3.92811 10.6704 3.92811H12.6607C12.7713 3.92811 12.8267 3.92811 12.8725 3.95408C12.9184 3.98005 12.9468 4.0275 13.0037 4.1224L13.9849 5.7586C14.045 5.85886 14.0751 5.90899 14.0751 5.96437C14.0751 6.01975 14.045 6.06987 13.9849 6.17011L13.0107 7.79377Z" stroke-miterlimit="10"/></svg>',
   };
 
   // 上下文圆环（14×14，描边 2px，形态对齐 deepseek ContextMeter）。
@@ -420,7 +484,7 @@
 
   // ================= DOM 装配 =================
 
-  var ui = null; // mountBar 返回的控件引用集：{ bar, pop, pills:{activity,usage,context,subagent,gear}, activityLabel, speedNum, usageNum, cacheNum, ctxPct, ctxFill, subLabel, subSep, subSpeed }
+  var ui = null; // mountBar 返回的控件引用集：{ bar, pop, pills:{activity,usage,context,subagent,gear}, activityLabel, speedNum, usageNum, cacheNum, ctxPct, ctxFill, subLive, subLabel, subSpeed }
   var popMode = null; // 'activity' | 'usage' | 'context' | 'menu' | null
   var pendingTrend = null; // 待定点绘制的趋势样本：弹层 hidden 期间无像素宽，解除隐藏后 layoutTrend 消费
   var resizeObserver = null; // 容器宽度监听（watchResize 建立，随 bar 生命周期）
@@ -495,15 +559,16 @@
     pCtx.appendChild(ctxPct);
     var ctxFill = pCtx.querySelector('.zsb-ring-fill');
 
-    // 子代理：双态（运行中 = 活跃数·速度；闲 = 会话累计 token，中性灰）
+    // 子代理双态：运行中 = 绿点 · 速度；闲 = 会话累计 token（中性灰）。
+    // 运行态不显示活跃数——二元状态由绿点承担，个数在子代理面板分组标题里可查。
     var pSub = makePill('subagent', ICONS.subagent, I18N.subIdleTip);
+    var subLive = el('i', 'zsb-livedot');
     var subLabel = el('span', 'zsb-num', '--');
-    var subSep = el('span', null, ' · ');
     var subSpeed = el('span', 'zsb-num');
-    subSep.style.display = 'none'; // 运行态才显示"活跃数 · 速度"
+    subLive.style.display = 'none'; // 运行态才显示绿点
     subSpeed.style.display = 'none';
+    pSub.appendChild(subLive);
     pSub.appendChild(subLabel);
-    pSub.appendChild(subSep);
     pSub.appendChild(subSpeed);
 
     // 齿轮
@@ -515,8 +580,8 @@
 
     bar.appendChild(pAct);
     bar.appendChild(pUsage);
-    bar.appendChild(pCtx);
     bar.appendChild(pSub);
+    bar.appendChild(pCtx);
     bar.appendChild(pGear);
     bar.appendChild(pop);
 
@@ -541,8 +606,8 @@
       cacheNum: cacheNum,
       ctxPct: ctxPct,
       ctxFill: ctxFill,
+      subLive: subLive,
       subLabel: subLabel,
-      subSep: subSep,
       subSpeed: subSpeed,
     };
   }
@@ -561,6 +626,7 @@
     ui.pop.innerHTML = '';
     if (mode === 'activity') buildActivityDetail(ui.pop);
     else if (mode === 'usage') buildUsageDetail(ui.pop);
+    else if (mode === 'subagent') buildSubagentPanel(ui.pop);
     else if (mode === 'context') {
       state.breakdown = readContextBreakdown(); // 仅打开时读一次，不进 1s 渲染循环
       buildContextDetail(ui.pop);
@@ -576,6 +642,14 @@
   function togglePop(mode) {
     if (popMode === mode) closePop();
     else openPop(mode);
+  }
+
+  // 子代理面板是唯一"活"的弹层：数据每秒都在变，冻结在打开那一刻就等于读数不动。
+  // 只在 subagent 模式且数据到达时重建，其余弹层保持"打开时快照"的既有行为。
+  // 重建保留 subView（列表/详情位置），所以详情页会随数据刷新而不是被踢回列表。
+  function refreshSubagentPop() {
+    if (popMode !== 'subagent' || !ui) return;
+    openPop('subagent');
   }
 
   function sectionTitle(pop, text) {
@@ -719,15 +793,56 @@
     box.innerHTML = buildTrendSvg(trend, box.clientWidth || 280);
   }
 
-  // 速度趋势折线图（SVG 自绘，零依赖）：
+  // 速度趋势曲线图（SVG 自绘，零依赖）：
   // - 纵轴按本轮样本动态归一（非固定色阶域），保证小速度样本也有可见波动；
   // - 顶/中虚线网格带峰值与半值标注，底部实线基线；
-  // - 折线描边沿 x 用各采样点 speedColor 取色的 linearGradient，数据点圆点同色，
+  // - 描边沿 x 用各采样点 speedColor 取色的 linearGradient，数据点圆点同色，
   //   颜色语义与底部状态条速度数字一致；
   // - 右上角标注当前速度（末点值，同色），左上角标注峰值；
   // - ramp 缺失 → 全图退 currentColor 中性灰（与数字降级口径一致）。
   // 坐标按构建时容器像素宽定点：弹层打开期间宽度稳定，重开弹层即重算。
   var TREND_H = 64; // 与 .zsb-trend 高度一致
+
+  /**
+   * 单调三次贝塞尔路径（Fritsch–Carlson 切线钳制）。
+   * 逐点折线在 60px 高度里读起来是锯齿；直接套 Catmull-Rom 又会在峰谷处过冲，
+   * 越过峰值网格线甚至画出负速度。切线按相邻斜率的加权调和均值取，段间保持单调，
+   * 曲线只在相邻样本之间弯，不会凭空造出数据里没有的峰。
+   */
+  function smoothPath(px, py) {
+    var n = px.length;
+    var d = 'M' + px[0].toFixed(1) + ',' + py[0].toFixed(1);
+    if (n === 2) return d + ' L' + px[1].toFixed(1) + ',' + py[1].toFixed(1);
+    var dx = [];
+    var dy = [];
+    var slope = [];
+    for (var i = 0; i < n - 1; i++) {
+      dx[i] = px[i + 1] - px[i];
+      dy[i] = py[i + 1] - py[i];
+      slope[i] = dx[i] === 0 ? 0 : dy[i] / dx[i];
+    }
+    var t = [];
+    t[0] = slope[0];
+    t[n - 1] = slope[n - 2];
+    for (var j = 1; j < n - 1; j++) {
+      if (slope[j - 1] * slope[j] <= 0) {
+        t[j] = 0; // 极值点切线取平，峰谷处不过冲
+      } else {
+        var w1 = 2 * dx[j] + dx[j - 1];
+        var w2 = dx[j] + 2 * dx[j - 1];
+        t[j] = (w1 + w2) / (w1 / slope[j - 1] + w2 / slope[j]);
+      }
+    }
+    for (var k = 0; k < n - 1; k++) {
+      var h = dx[k];
+      d +=
+        ' C' + (px[k] + h / 3).toFixed(1) + ',' + (py[k] + (t[k] * h) / 3).toFixed(1) +
+        ' ' + (px[k + 1] - h / 3).toFixed(1) + ',' + (py[k + 1] - (t[k + 1] * h) / 3).toFixed(1) +
+        ' ' + px[k + 1].toFixed(1) + ',' + py[k + 1].toFixed(1);
+    }
+    return d;
+  }
+
   function buildTrendSvg(trend, w) {
     var padT = 14;
     var padB = 6;
@@ -759,7 +874,7 @@
       }
       parts.push('<defs><linearGradient id="zsb-trend-grad" x1="0" y1="0" x2="1" y2="0">' + stops + '</linearGradient></defs>');
     }
-    var yTop = y(vpeak > 0 ? vpeak : 0); // 全零时顶网格线落基线，与折线重合
+    var yTop = y(vpeak > 0 ? vpeak : 0); // 全零时顶网格线落基线，与曲线重合
     var yMid = y(vmax / 2);
     var yBase = y(0);
     parts.push('<line class="zsb-tgrid dash" x1="0" y1="' + yTop.toFixed(1) + '" x2="' + w + '" y2="' + yTop.toFixed(1) + '"/>');
@@ -768,15 +883,16 @@
     parts.push('<text class="zsb-tick" x="0" y="' + (yTop - 3).toFixed(1) + '">' + fmtTok(vpeak) + '</text>');
     parts.push('<text class="zsb-tick" x="0" y="' + (yMid - 3).toFixed(1) + '">' + fmtTok(vmax / 2) + '</text>');
     if (n > 1) {
-      var pts = '';
+      var px = [];
+      var py = [];
       for (var j = 0; j < n; j++) {
-        pts += x(j).toFixed(1) + ',' + y(vals[j]).toFixed(1) + ' ';
+        px.push(x(j));
+        py.push(y(vals[j]));
       }
-      var line = 'M' + x(0).toFixed(1) + ',' + yBase.toFixed(1) +
-        ' L' + pts.trim().split(' ').join(' L') +
-        ' L' + x(n - 1).toFixed(1) + ',' + yBase.toFixed(1) + ' Z';
-      parts.push('<path d="' + line + '" fill="url(#zsb-trend-grad)" opacity="0.14"/>');
-      parts.push('<polyline points="' + pts.trim() + '" fill="none" stroke="url(#zsb-trend-grad)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>');
+      var curve = smoothPath(px, py);
+      parts.push('<path d="' + curve + ' L' + px[n - 1].toFixed(1) + ',' + yBase.toFixed(1) +
+        ' L' + px[0].toFixed(1) + ',' + yBase.toFixed(1) + ' Z" fill="url(#zsb-trend-grad)" opacity="0.14"/>');
+      parts.push('<path d="' + curve + '" fill="none" stroke="url(#zsb-trend-grad)" stroke-width="1.5" stroke-linecap="round"/>');
     }
     for (var k = 0; k < n; k++) {
       parts.push('<circle cx="' + x(k).toFixed(1) + '" cy="' + y(vals[k]).toFixed(1) + '" r="' + (k === n - 1 ? 2.5 : 2) +
@@ -789,7 +905,7 @@
     return parts.join('');
   }
 
-  // Usage 详情：输入/输出/缓存读/缓存写分项 + 工具调用明细 + 子代理明细。无任何费用字样。
+  // Usage 详情：输入/输出/缓存读/缓存写 + 缓存占比 + 今日用量 + 工具调用明细。无任何费用字样。
   function buildUsageDetail(pop) {
     var s = state.session || {};
     var t = s.tokens || {};
@@ -798,43 +914,163 @@
     pop.appendChild(row(I18N.outputTok, fmtTok(t.output)));
     pop.appendChild(row(I18N.cacheRead, fmtTok(t.cacheRead)));
     pop.appendChild(row(I18N.cacheWrite, fmtTok(t.cacheWrite)));
+    pop.appendChild(row(I18N.cacheShare, fmtPct(s.cacheHitRate)));
+
+    var todaySec = buildTodaySection();
+    if (todaySec) pop.appendChild(todaySec);
+
     var tools = s.tools || {};
     var toolSec = el('div', 'zsb-sec');
     toolSec.appendChild(el('div', 'zsb-pop-title', I18N.toolsTitle));
     var toolList = Array.isArray(tools.list) ? tools.list : [];
-    var toolTotal = typeof tools.total === 'number' && isFinite(tools.total) ? tools.total : 0;
-    if (!toolList.length && !toolTotal) {
+    if (!toolList.length) {
       toolSec.appendChild(el('div', 'k', I18N.noData));
     } else {
-      toolSec.appendChild(row(I18N.toolsTotal, toolTotal + I18N.toolCallsUnit +
-        (tools.errors ? ' · ' + I18N.toolErrors + ' ' + tools.errors : '')));
       toolList.forEach(function (item) {
         var name = item.name || '--';
         var r = el('div', 'zsb-row');
         var k = el('span', 'zsb-tool-k', name);
         k.title = name;
         r.appendChild(k);
-        var v = el('span', 'v');
-        v.textContent = (item.count || 0) + I18N.toolCallsUnit + ' · ' + fmtMsNum(item.durationMs) +
-          (item.errors ? ' · ' + I18N.toolErrors + ' ' + item.errors : '');
-        r.appendChild(v);
+        r.appendChild(el('span', 'v', (item.count || 0) + I18N.toolCallsUnit + ' · ' + fmtMsNum(item.durationMs)));
         toolSec.appendChild(r);
       });
     }
     pop.appendChild(toolSec);
-    var sub = s.subagent || {};
+  }
+
+  // 今日用量（全库今日 completed 行，来自内核帧的 today 块）：token 总量与平均缓存率。
+  // 内核帧缺席（如直接推送 aggregate 的兼容路径）时整组不渲染——宁可少显示，不拿零值冒充。
+  function buildTodaySection() {
+    var d = state.today;
+    if (!d || typeof d !== 'object') return null;
+    var input = finNum(d.input);
+    var output = finNum(d.output);
+    var cacheRead = finNum(d.cache_read);
+    // 总量优先取库侧的 computed_total_tokens（与 input+output 同值，实库校验 0 条不符）；
+    // 该列缺失时用两项相加兜底，不因此整组降级。
+    var total = finNum(d.total);
+    if (total == null && input != null && output != null) total = input + output;
     var sec = el('div', 'zsb-sec');
-    sec.appendChild(el('div', 'zsb-pop-title', I18N.subagents));
-    var rows = Array.isArray(sub.rows) ? sub.rows : [];
-    if (!rows.length) {
-      sec.appendChild(el('div', 'k', I18N.noData));
-    } else {
-      rows.forEach(function (r) {
-        var statusText = r.status === 'running' ? '运行中' : r.status === 'completed' ? '已完成' : r.status || '--';
-        sec.appendChild(row((r.model || '子代理') + ' · ' + statusText, fmtTok(r.outputTokens)));
-      });
+    sec.appendChild(el('div', 'zsb-pop-title', I18N.todayTitle));
+    sec.appendChild(row(I18N.todayTokens, total != null ? fmtTok(total) : '--'));
+    sec.appendChild(row(I18N.todayCacheRate,
+      input != null && cacheRead != null && input > 0 ? fmtPct(cacheRead / input) : '--'));
+    return sec;
+  }
+
+  // ================= 子代理面板（R2/R3/R4） =================
+
+  // 两种视图共用一次 openPop 的容器：subView.mode 决定画列表还是详情。
+  // 详情目标按 key 现查最新数据，不缓存条目对象——子代理在详情页打开期间继续跑，
+  // 缓存会让读数冻结在打开那一刻。
+  var subView = { mode: 'list', key: null };
+
+  function subItems() {
+    var s = state.session || {};
+    var sub = s.subagent || {};
+    return Array.isArray(sub.list) ? sub.list : [];
+  }
+
+  function buildSubagentPanel(pop) {
+    if (subView.mode === 'detail') {
+      var target = null;
+      var list = subItems();
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].key === subView.key) { target = list[i]; break; }
+      }
+      if (target) {
+        buildSubagentDetail(pop, target);
+        return;
+      }
+      subView.mode = 'list'; // 目标已消失（列表被刷新掉）：退回列表，不留空详情
+      subView.key = null;
     }
+    var items = subItems();
+    var running = items.filter(function (it) { return it.status === 'running'; });
+    var done = items.filter(function (it) { return it.status !== 'running'; });
+    sectionTitle(pop, I18N.subagents);
+    if (!running.length && !done.length) {
+      pop.appendChild(el('div', 'k', I18N.noData));
+      return;
+    }
+    appendSubGroup(pop, I18N.subRunning, running);
+    appendSubGroup(pop, I18N.subDone, done);
+  }
+
+  // 空组不渲染标题：没有运行中条目时不留一个空壳分组（AC9）
+  function appendSubGroup(pop, title, items) {
+    if (!items.length) return;
+    var sec = el('div', 'zsb-subgroup');
+    sec.appendChild(el('div', 'zsb-pop-title', title + ' · ' + items.length));
+    items.forEach(function (it) {
+      var btn = el('button', 'zsb-subrow');
+      btn.type = 'button';
+      btn.dataset.subkey = it.key;
+      var dot = el('i', 'zsb-subdot');
+      // 运行中行用绿色（静止；呼吸只留在状态条的绿点上，避免面板内多点同闪）
+      if (it.status === 'running') dot.className = 'zsb-subdot zsb-live';
+      btn.appendChild(dot);
+      // 无类型（历史 Agent 回执缺 agentId、标题前缀也对不上）时用子会话尾号兜底：
+      // 任务名无从得知，但至少让几条条目彼此可区分，不显示成一串同名占位。
+      var nmText = it.type || shortId(it.childSessionId) || I18N.subUnnamed;
+      var nm = el('span', 'nm', nmText);
+      nm.title = it.type || '';
+      btn.appendChild(nm);
+      var tk = el('span', 'tk', it.task || '');
+      if (it.task) tk.title = it.task;
+      btn.appendChild(tk);
+      btn.appendChild(el('span', 'go', '›'));
+      sec.appendChild(btn);
+    });
     pop.appendChild(sec);
+  }
+
+  function buildSubagentDetail(pop, it) {
+    var back = el('button', 'zsb-back');
+    back.type = 'button';
+    back.dataset.act = 'sub-back';
+    back.appendChild(el('span', null, '‹ ' + I18N.subBack));
+    pop.appendChild(back);
+    sectionTitle(pop, it.type || I18N.subUnnamed);
+    pop.appendChild(row(I18N.subStatus, subStatusText(it.status)));
+    if (it.task) pop.appendChild(row(I18N.subTask, it.task));
+    pop.appendChild(row(I18N.subStarted, fmtClock(it.startedAt)));
+    pop.appendChild(row(I18N.subDuration, fmtDur(it.durationMs)));
+    // 运行中的 token 尚未落库，显示 0 会读成"没产出"。改显占位，不伪造读数。
+    if (it.status === 'running') {
+      pop.appendChild(row(I18N.subRequests, '--'));
+      pop.appendChild(row(I18N.subOutput, '--'));
+      pop.appendChild(row(I18N.subTps, '--'));
+      return;
+    }
+    pop.appendChild(row(I18N.subRequests, String(it.requests || 0)));
+    pop.appendChild(row(I18N.subInput, fmtTok(it.inputTokens)));
+    pop.appendChild(row(I18N.subOutput, fmtTok(it.outputTokens)));
+    pop.appendChild(row(I18N.subCache, fmtTok(it.cacheReadTokens) + ' / ' + fmtTok(it.cacheWriteTokens)));
+    pop.appendChild(row(I18N.subTps, it.tpsAvg != null ? Math.round(it.tpsAvg) + ' tok/s' : '--'));
+  }
+
+  function subStatusText(st) {
+    if (st === 'running') return I18N.subStRunning;
+    if (st === 'error') return I18N.subStError;
+    if (st === 'cancelled') return I18N.subStCancelled;
+    return I18N.subStDone;
+  }
+
+  // 子会话 id 尾段（后 6 位）：sess_subagent_agent_<uuid> 的 uuid 尾部足够区分同会话内的条目
+  function shortId(id) {
+    if (typeof id !== 'string' || !id) return '';
+    var tail = id.slice(-6);
+    return tail.length === 6 ? '#' + tail : '';
+  }
+
+  // 起止时间只到分钟：详情页关心"什么时候跑的"，秒级精度对子代理没有意义
+  function fmtClock(ms) {
+    if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return '--';
+    var d = new Date(ms);
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
   // ================= 齿轮短菜单（R7，全部短句） =================
@@ -890,6 +1126,12 @@
   }
 
   function onMenuAction(act, pill) {
+    if (act === 'sub-back') {
+      subView.mode = 'list';
+      subView.key = null;
+      openPop('subagent'); // 重建列表；数据取最新，不恢复打开前的缓存
+      return;
+    }
     if (act === 'toggle') {
       state.visible[pill] = !state.visible[pill];
       saveVisible();
@@ -978,11 +1220,16 @@
 
   // ================= 渲染 =================
 
-  // 显示 = 用户开关 AND 该 pill 有数据。上下文 pill 在宿主锚点缺席时整只不占位（R4/R10）。
+  // 显示 = 用户开关 AND 该 pill 有理由显示。两类"无理由"整只不占位：
+  // - 上下文 pill：宿主锚点缺席或占用为 0（R4/R10）
+  // - 子代理 pill：本会话还没出现过任何子代理（subSeen 为会话内粘滞标志，
+  //   出现过一次后不再回退，避免子代理连续派发时 pill 闪进闪出）
   function renderVisibility() {
     if (!ui) return;
     ['activity', 'usage', 'context', 'subagent', 'gear'].forEach(function (n) {
-      var on = state.visible[n] && (n !== 'context' || !!state.context);
+      var hasReason = n !== 'context' || !!state.context;
+      if (n === 'subagent') hasReason = state.subSeen;
+      var on = state.visible[n] && hasReason;
       ui.pills[n].style.display = on ? '' : 'none';
     });
   }
@@ -1057,6 +1304,14 @@
     return null;
   }
 
+  // 会话身份：内核在 detail 上带 mine（本窗口焦点会话 id）；非包裹路径没有该字段。
+  // 用于判定"这条数据属于哪个会话"，是粘滞标志的归属依据——同一窗格换会话时
+  // paneId 不变、unmountBar 不触发，只能靠它识别切换。
+  function sessionOwner(detail) {
+    if (!detail || typeof detail !== 'object') return null;
+    return typeof detail.mine === 'string' && detail.mine ? detail.mine : null;
+  }
+
   // 当前速度读数：生成中（样本 3s 内新鲜）→ 估算态；否则 → 核实态（会话均）
   function currentSpeed() {
     var t = state.turn;
@@ -1106,27 +1361,36 @@
     }
     if (ctxChanged) renderVisibility(); // 有/无占用切换时才动 display，避免每秒重排
 
-    // ---- 子代理双态（R5）：运行中 = 活跃数·速度（上色阶）；闲 = 会话累计（中性灰）----
+    // ---- 子代理双态（R5）：运行中 = 绿点 · 速度；闲 = 会话累计（中性灰）----
+    // subSeen 只在这里翻真：会话内第一次看到子代理时显形，之后不再隐藏（见 renderVisibility）。
+    // 翻假只发生在换会话（session 事件里重置），那里同步调了 renderVisibility，
+    // 所以这里只需处理翻真这一次，避免每秒重排。
+    var subRows = Array.isArray(sub.list) ? sub.list : [];
+    if (!state.subSeen && (sub.activeCount > 0 || subRows.length > 0)) {
+      state.subSeen = true;
+      renderVisibility();
+    }
     var subRunning = sub.activeCount > 0;
-    if (subRunning && typeof sub.activeTokPerSec === 'number' && isFinite(sub.activeTokPerSec)) {
-      ui.subSep.style.display = '';
+    var subSpeedOk = subRunning && typeof sub.activeTokPerSec === 'number' && isFinite(sub.activeTokPerSec);
+    // 绿点是运行态的二元指示，不呼吸数字本身（呼吸挂点上，对齐原插件 zupulse）
+    ui.subLive.style.display = subRunning ? '' : 'none';
+    ui.subLive.className = subRunning ? 'zsb-livedot zsb-pulse' : 'zsb-livedot';
+    if (subSpeedOk) {
       ui.subSpeed.style.display = '';
       ui.subSpeed.textContent = Math.round(sub.activeTokPerSec) + ' tok/s';
       var rampNow = rampApi();
       // ramp 缺失 → 速度退中性灰（继承基色）
       ui.subSpeed.style.color = rampNow ? rampNow.speedColor(sub.activeTokPerSec) || '' : '';
     } else {
-      ui.subSep.style.display = 'none';
       ui.subSpeed.style.display = 'none';
       ui.subSpeed.style.color = '';
     }
-    if (subRunning) {
-      ui.subLabel.textContent = String(sub.activeCount);
-      ui.pills.subagent.title = I18N.subRunningTip;
-    } else {
-      ui.subLabel.textContent = fmtTok(sub.sessionTokens || 0);
-      ui.pills.subagent.title = I18N.subIdleTip;
-    }
+    // 运行态只出绿点 + 速度，不显示活跃数；速度尚不可得时用占位符说明"在跑但读数未到"。
+    // 空 span 会占掉一个 flex gap，所以用 display 切换而不是只清空文本。
+    var labelText = subRunning ? (subSpeedOk ? '' : '--') : fmtTok(sub.sessionTokens || 0);
+    ui.subLabel.textContent = labelText;
+    ui.subLabel.style.display = labelText ? '' : 'none';
+    ui.pills.subagent.title = subRunning ? I18N.subRunningTip : I18N.subIdleTip;
 
     // 降级档位依赖"子代理是否在跑"（运行态比闲置态更值得保留），与数据同轮刷新，
     // 避免先按旧状态选档、下一轮才改，造成一次可见的跳动。
@@ -1253,6 +1517,10 @@
     state.mounted = false;
     state.context = null;
     state.breakdown = null; // 换会话必须丢弃上一会话的来源明细（防串数）
+    // 换会话必须丢弃粘滞标志：否则上个会话的子代理会让新会话的 pill 一直占位（防串数）
+    state.subSeen = false;
+    subView.mode = 'list';
+    subView.key = null;
     fitLevel = 0; // 新 bar 从最高档位重新自适应
     fitAvail = -1; // 宽度缓存失效，下次必测
     fitSpan = -1;
@@ -1325,12 +1593,25 @@
     ui.pills.context.addEventListener('click', function () {
       togglePop('context');
     });
+    ui.pills.subagent.addEventListener('click', function () {
+      subView.mode = 'list'; // 每次从 pill 进入都回到列表，不停在上次的详情
+      subView.key = null;
+      togglePop('subagent');
+    });
     ui.pills.gear.addEventListener('click', function () {
       togglePop('menu');
     });
 
     // 菜单动作（事件委托）
     ui.pop.addEventListener('click', function (ev) {
+      // 子代理行：进详情（key 由行上的 data-subkey 携带，现查最新条目）
+      var subRow = ev.target && ev.target.closest ? ev.target.closest('[data-subkey]') : null;
+      if (subRow && ui.pop.contains(subRow)) {
+        subView.mode = 'detail';
+        subView.key = subRow.dataset.subkey;
+        openPop('subagent');
+        return;
+      }
       var mi = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
       if (mi && ui.pop.contains(mi)) onMenuAction(mi.dataset.act, mi.dataset.pill);
     });
@@ -1382,11 +1663,27 @@
 
     // 会话聚合：内核主进程推送（detail = { ...zusage 快照, aggregate }，经 normalizeSession 取 aggregate）
     W.addEventListener(EV.SESSION, function (ev) {
+      var owner = sessionOwner(ev && ev.detail);
+      // 换了会话就直接丢上一会话的粘滞标志与面板位置：同一窗格切会话时 paneId 不变、
+      // unmountBar 不触发，只靠卸载路径重置会让上一个会话的子代理把新会话的 pill 一直点亮。
+      // 重置后必须立刻刷可见性：render() 只在 subSeen 翻真时动 display，翻假没人管。
+      if (owner && owner !== state.sessionOwner) {
+        state.sessionOwner = owner;
+        state.subSeen = false;
+        subView.mode = 'list';
+        subView.key = null;
+        renderVisibility();
+      }
       var d = normalizeSession(ev && ev.detail);
+      // 今日用量属于全库口径（内核帧顶层 today），与会话 aggregate 各自独立：
+      // 任一到达都存，缺席时保留上一次成功帧的读数而不是抹成零。
+      var day = ev && ev.detail && ev.detail.today;
+      if (day && typeof day === 'object' && !Array.isArray(day)) state.today = day;
       if (d) {
         state.session = d;
         state.sessionAt = Date.now();
         render();
+        refreshSubagentPop(); // 面板开着时随之刷新（子代理读数每秒都在变）
       }
     });
 

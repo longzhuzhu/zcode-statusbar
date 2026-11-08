@@ -46,8 +46,11 @@ from pathlib import Path
 CORE = Path(__file__).parent.resolve()
 PLUGIN_NAME = "zcode-statusbar"
 # 插件根（清单/hooks 所在）：发布布局为 <marketplace 根>/plugins/zcode-statusbar，与
-# core/ 同根并列；仓库开发布局同构（仓库根/plugins/zcode-statusbar）。
-PLUGIN_ROOT = CORE.parent / "plugins" / PLUGIN_NAME
+# core/ 同根并列；仓库开发布局同构（仓库根/plugins/zcode-statusbar）。ZCode 缓存安装
+# 是扁平布局（运行时文件与 hooks/ 同级，本文件即插件根），按清单目录存在性判定。
+_FLAT_PACKAGE = (CORE / ".zcode-plugin" / "plugin.json").is_file() \
+    or (CORE / ".claude-plugin" / "plugin.json").is_file()
+PLUGIN_ROOT = CORE if _FLAT_PACKAGE else CORE.parent / "plugins" / PLUGIN_NAME
 # 手动命令模板里的解释器：用当前真实解释器绝对路径，不猜 python/python3 别名
 PYEXE = sys.executable or "python"
 if str(CORE) not in sys.path:
@@ -402,9 +405,9 @@ function migrate() {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("同步验收记录不是 JSON 对象: " + file);
     return value;
   };
-  const root = fs.realpathSync(pluginRoot), id = "zcode-statusbar@zcode-statusbar-marketplace";
+  const root = fs.realpathSync(pluginRoot), ids = ["zcode-statusbar@zcode-statusbar", "zcode-statusbar@zcode-statusbar-marketplace"];
   const manifest = readObject(path.join(root, ".zcode-plugin", "plugin.json"), null);
-  if (!manifest || manifest.name !== id.split("@")[0]) throw Error("同步插件清单身份无效");
+  if (!manifest || manifest.name !== ids[0].split("@")[0]) throw Error("同步插件清单身份无效");
   updater.compareVersions(manifest.version, manifest.version);
   const pending = readObject(path.join(runtime, "plugin-update.json"), null);
   const hasPending = pending && (pending.pendingSync === true || pending.pendingRelease != null || pending.pendingPid);
@@ -424,10 +427,12 @@ function migrate() {
     if (live(pending.pendingPid)) throw Error("插件安装进程仍在运行，停止运行时同步");
   }
   const storage = resolvePluginStorage(os.homedir(), process.env);
-  if (fs.existsSync(path.join(storage, "marketplaces", ".zcode-statusbar-marketplace.marketplace.transaction.json"))) throw Error("官方市场事务尚未完成，停止运行时同步");
+  for (const market of ["zcode-statusbar", "zcode-statusbar-marketplace"]) {
+    if (fs.existsSync(path.join(storage, "marketplaces", "." + market + ".marketplace.transaction.json"))) throw Error("官方市场事务尚未完成，停止运行时同步");
+  }
   const inventory = readObject(path.join(storage, "installed_plugins.json"), null);
   if (inventory && !Array.isArray(inventory.plugins)) throw Error("官方安装记录形状无效");
-  const records = inventory ? inventory.plugins.filter(row => row && row.id === id && row.scope === "user") : [];
+  const records = inventory ? inventory.plugins.filter(row => row && row.scope === "user" && ids.includes(row.id)) : [];
   if (!records.length) {
     if (hasPending || inventory) throw Error("同步所需用户插件安装记录不存在");
     return { ok: true, pluginRoot: root, identity: { record: null, channel: null, pending, manifest } };

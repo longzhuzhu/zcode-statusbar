@@ -144,3 +144,78 @@ test("外部页面/异常 DOM：querySelector 抛错时全部返回 null", () =>
   assert.equal(bridge.getPaneId(), null);
   assert.equal(bridge.getSessionSnapshot(), null);
 });
+
+// ── getContextBreakdown：窄投影（只要 used/size/breakdown，不搬整份会话快照） ──
+
+function paneWithUsage(usage) {
+  return {
+    bridgePane: { zcstatusbarPaneId: "pane-c", sessionId: "sess_c",
+      zcstatusbarWorkspacePath: "/repo", zcstatusbarWorkspaceIdentity: "",
+      zcstatusbarRemoteSessionId: "" },
+    accessor: () => ({ getState: () => ({ snapshot: { usage } }) }),
+  };
+}
+
+test("getContextBreakdown：投影 used/size/breakdown 三项，不泄漏宿主对象", () => {
+  const hostBreakdown = [
+    { source: "system_prompt", chars: 1400 },
+    { source: "messages", chars: 3100 },
+  ];
+  const bridge = loadShim(makeWindow(paneWithUsage({
+    contextWindow: { usedTokens: 11400, maxTokens: 262000, breakdown: hostBreakdown },
+  })));
+  const got = bridge.getContextBreakdown();
+  assert.equal(got.used, 11400);
+  assert.equal(got.size, 262000);
+  // vm 沙箱构造的数组/对象原型跨 realm，重建为主 realm 普通结构再比较（同文件既有做法）
+  assert.deepEqual(Array.from(got.breakdown, (item) => ({ ...item })), [
+    { source: "system_prompt", chars: 1400 },
+    { source: "messages", chars: 3100 },
+  ]);
+  assert.notEqual(got.breakdown, hostBreakdown, "浅副本：宿主数组不外流");
+  assert.notEqual(got.breakdown[0], hostBreakdown[0], "逐项副本：consumer 写不回宿主");
+});
+
+test("getContextBreakdown：无 breakdown 时返回 null 字段（不伪造分项）", () => {
+  const bridge = loadShim(makeWindow(paneWithUsage({
+    contextWindow: { usedTokens: 800, maxTokens: 1000 },
+  })));
+  const got = bridge.getContextBreakdown();
+  assert.equal(got.breakdown, null);
+  assert.equal(got.used, 800);
+  assert.equal(got.size, 1000);
+});
+
+test("getContextBreakdown：脏分项逐条跳过（非数字/负数/缺 source）", () => {
+  const bridge = loadShim(makeWindow(paneWithUsage({
+    contextWindow: { usedTokens: 500, maxTokens: 1000, breakdown: [
+      { source: "messages", chars: 300 },
+      { source: "system_prompt", chars: -5 },
+      { source: "tool_prompt", chars: "abc" },
+      { chars: 100 },
+      { source: "skills", chars: 0 },
+    ] },
+  })));
+  const got = bridge.getContextBreakdown();
+  // vm 沙箱构造的数组/对象原型跨 realm，重建为主 realm 普通结构再比较（同文件既有做法）
+  assert.deepEqual(Array.from(got.breakdown, (item) => ({ ...item })), [{ source: "messages", chars: 300 }]);
+});
+
+test("getContextBreakdown：无 usage / 无 contextWindow / 访问器抛错 → null", () => {
+  for (const usage of [null, undefined, {}]) {
+    const bridge = loadShim(makeWindow(paneWithUsage(usage)));
+    assert.equal(bridge.getContextBreakdown(), null);
+  }
+  const throwing = loadShim(makeWindow({
+    bridgePane: { zcstatusbarPaneId: "p", sessionId: "s",
+      zcstatusbarWorkspacePath: "/repo", zcstatusbarWorkspaceIdentity: "",
+      zcstatusbarRemoteSessionId: "" },
+    accessor: () => { throw new Error("boom"); },
+  }));
+  assert.equal(throwing.getContextBreakdown(), null);
+});
+
+test("getContextBreakdown：身份不可确认（无 pane）时不猜测，返回 null", () => {
+  const bridge = loadShim(makeWindow());
+  assert.equal(bridge.getContextBreakdown(), null);
+});

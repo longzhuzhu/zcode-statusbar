@@ -22,11 +22,14 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 def find_core_root():
     """从插件根逐级向上找 core/runtime_install.py：发布布局在 marketplace 根下，
-    仓库开发布局在仓库根下，同构。找不到返回 None（fail-closed，不猜路径）。"""
+    仓库开发布局在仓库根下，同构。扁平插件包（ZCode 缓存安装：运行时文件与
+    hooks/ 同级）兜底返回插件根自身。找不到返回 None（fail-closed，不猜路径）。"""
     for base in (PLUGIN_ROOT, *PLUGIN_ROOT.parents):
         candidate = base / "core" / "runtime_install.py"
         if candidate.is_file():
             return base / "core"
+    if (PLUGIN_ROOT / "runtime_install.py").is_file():
+        return PLUGIN_ROOT
     return None
 
 

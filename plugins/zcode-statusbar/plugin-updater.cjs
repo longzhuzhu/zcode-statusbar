@@ -19,6 +19,11 @@ const releaseChannel = require("./plugin-release.cjs");
 const { resolvePluginStorage } = require("./plugin-storage.cjs");
 
 const PLUGIN_ID = releaseChannel.PLUGIN_ID;
+// 官方安装记录 id 随安装来源的 marketplace 名变化：Release ZIP 布局为
+// zcode-statusbar-marketplace，本地目录/官方市场安装用仓库 marketplace.json 的
+// name（zcode-statusbar）。身份锚定按双约定匹配。
+const PLUGIN_IDS = [PLUGIN_ID, "zcode-statusbar@zcode-statusbar"];
+const MARKETPLACE_NAMES = [releaseChannel.MARKETPLACE_NAME, "zcode-statusbar"];
 const INTERVAL_MS = 60 * 60 * 1000;
 
 function cliExecutable(executable, platform = process.platform) {
@@ -240,10 +245,10 @@ function verifyRuntimeSync(options) {
     catch (error) { if (error.code !== "ESRCH") throw error; }
   }
   const storage = resolvePluginStorage(home, env);
-  if (fs.existsSync(path.join(storage, "marketplaces", "." + releaseChannel.MARKETPLACE_NAME + ".marketplace.transaction.json"))) throw new Error("官方市场事务尚未完成，停止运行时同步");
+  if (MARKETPLACE_NAMES.some((name) => fs.existsSync(path.join(storage, "marketplaces", "." + name + ".marketplace.transaction.json")))) throw new Error("官方市场事务尚未完成，停止运行时同步");
   const inventory = readObject(path.join(storage, "installed_plugins.json"), null);
   if (inventory && !Array.isArray(inventory.plugins)) throw new Error("官方安装记录形状无效");
-  const records = inventory ? inventory.plugins.filter((row) => row && row.id === PLUGIN_ID && row.scope === "user") : [];
+  const records = inventory ? inventory.plugins.filter((row) => row && row.scope === "user" && PLUGIN_IDS.includes(row.id)) : [];
   if (!records.length) {
     if (hasPending || inventory) throw new Error("同步所需用户插件安装记录不存在");
     return { ok: true, pluginRoot: root, version: manifest.version, identity: { record: null, channel: null, pending, manifest } };
@@ -272,7 +277,7 @@ function listOverview(data) {
   if (Array.isArray(data)) {
     const diagnostics = [];
     for (const entry of data) {
-      if (entry && entry.id === PLUGIN_ID && Array.isArray(entry.diagnostics)) diagnostics.push(...entry.diagnostics);
+      if (entry && PLUGIN_IDS.includes(entry.id) && Array.isArray(entry.diagnostics)) diagnostics.push(...entry.diagnostics);
     }
     return { installed: data, available: [], diagnostics };
   }
@@ -346,17 +351,23 @@ function createUpdater(options) {
     cwd: home, env: { ...environment, HOME: home, USERPROFILE: home, ELECTRON_RUN_AS_NODE: "1", ZCODE_STORAGE_DIR: path.dirname(storage()) }, windowsHide: true,
     timeout: 120000, maxBuffer: 4 * 1024 * 1024,
   }, undefined, onSpawn));
-  // 同步入口：官方安装记录的 installPath 指向 <缓存根>/plugins/<插件名>；本仓库运行时
-  // 文件在 <缓存根>/core/，回退两层定位安装器（dev/本地目录来源同构）。
+  // 同步入口：官方安装记录的 installPath 指向插件缓存目录。扁平布局（运行时文件与
+  // hooks/ 同级）安装器就在该目录内；层级布局 installPath 为 <缓存根>/plugins/<插件名>，
+  // 本仓库运行时文件在 <缓存根>/core/，回退两层定位安装器（dev/本地目录来源同构）。
+  const installerOf = (root) => {
+    const flat = path.join(root, "runtime_install.py");
+    if (fs.existsSync(flat)) return flat;
+    return path.join(root, "..", "..", "core", "runtime_install.py");
+  };
   const sync = options.sync || ((root) => runFile(python(), [
-    path.join(root, "..", "..", "core", "runtime_install.py"), "sync",
+    installerOf(root), "sync",
   ], { cwd: home, env: { ...process.env, ZCODE_STATUSBAR_RUNTIME: runtime },
     windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 }));
 
   function installedRecord() {
     const inventory = readJson(path.join(storage(), "installed_plugins.json"), {});
     const records = inventory && inventory.plugins;
-    return Array.isArray(records) ? records.find((p) => p && p.id === PLUGIN_ID && p.scope === "user"
+    return Array.isArray(records) ? records.find((p) => p && p.scope === "user" && PLUGIN_IDS.includes(p.id)
       && typeof p.installPath === "string" && p.installPath && typeof p.version === "string") : null;
   }
   function refreshLocal() {
@@ -393,7 +404,7 @@ function createUpdater(options) {
       pendingSync: state.pendingSync, pendingVersion: state.pendingVersion, pendingPid: state.pendingPid, pendingRelease: state.pendingRelease, lastFailure: state.lastFailure || null });
   }
   function diagnostics(data) {
-    const errors = (data.diagnostics || []).filter((d) => d.severity === "error" && (!d.pluginId || d.pluginId === PLUGIN_ID));
+    const errors = (data.diagnostics || []).filter((d) => d.severity === "error" && (!d.pluginId || PLUGIN_IDS.includes(d.pluginId)));
     if (errors.length) throw new Error(errors.map((d) => d.message).join("; "));
   }
   async function catalogFallback(source, cause) {
@@ -461,7 +472,7 @@ function createUpdater(options) {
         state.phase = newer ? "available" : "current"; state.checkedAt = now(); save(); publish();
         if ((auto || install) && newer) {
           const overview = listOverview(await cli(["list"])); diagnostics(overview);
-          const installed = (overview.installed || []).find((p) => p && p.id === PLUGIN_ID && (!p.scope || p.scope === "user"));
+          const installed = (overview.installed || []).find((p) => p && PLUGIN_IDS.includes(p.id) && (!p.scope || p.scope === "user"));
           if (!installed) throw new Error("用户插件未注册，不能安装 Release");
           if (installed.enabled !== false) await installUpdate(auto);
         }
