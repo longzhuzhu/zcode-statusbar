@@ -50,13 +50,13 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1 首页/新建任务（`data-session-id="draft"`）下无状态条；切到真实会话后 1s 内出现；切回 draft 后消失。
-- [ ] AC2 齿轮按钮显示齿形轮廓，不再是辐条状。
-- [ ] AC3 官方上下文圆环按钮的颜色、弹层、交互与未装插件时一致；插件不再写官方 SVG 的任何属性。
-- [ ] AC4 会话中状态条出现上下文 pill（圆环 + 百分比）；有真实占用时读数与官方弹层顶部数字一致。
-- [ ] AC5 点击上下文 pill 展开详情，含已用/总量与进度条；再次点击、外点或 Escape 关闭。
-- [ ] AC6 官方锚点缺失或占用为 0 时该 pill 不渲染，其余 pill 不受影响。
-- [ ] AC7 `npm test` 全绿；`python3 core/sync_plugin.py --check` 无漂移。
+- [x] AC1 首页/新建任务（`data-session-id="draft"`）下无状态条；切到真实会话后 1s 内出现；切回 draft 后消失。
+- [x] AC2 齿轮按钮显示齿形轮廓，不再是辐条状。
+- [x] AC3 官方上下文圆环按钮的颜色、弹层、交互与未装插件时一致；插件不再写官方 SVG 的任何属性。
+- [x] AC4 会话中状态条出现上下文 pill（圆环 + 百分比）；有真实占用时读数与官方弹层顶部数字一致。
+- [x] AC5 点击上下文 pill 展开详情，含已用/总量与进度条；再次点击、外点或 Escape 关闭。
+- [x] AC6 官方锚点缺失或占用为 0 时该 pill 不渲染，其余 pill 不受影响。
+- [x] AC7 `npm test` 全绿；`python3 core/sync_plugin.py --check` 无漂移。
 
 ## Risks
 
