@@ -53,16 +53,16 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1 activity / usage / gear 三个 pill 渲染 DeepSeek 字形，14px 下笔画清晰；子代理 pill 仍是三分叉图标。
-- [ ] AC2 四个图标混排时生效描边一致（都是 1.4px），无某一个明显偏重或偏轻。
-- [ ] AC3 子代理运行中：图标后出现绿色圆点并呼吸，圆点后是速度读数；pill 内不出现活跃数数字。
-- [ ] AC4 子代理运行中数字本身静止；速度读数仍走 `speedColor()` 色阶，不因 R2 变绿。
-- [ ] AC5 子代理闲态：无绿色点，显示会话累计 token，中性灰。
-- [ ] AC6 面板内运行中行的状态点为绿色，已完成行为当前色半透明；分组标题仍带条目数。
-- [ ] AC7 运行态与闲态来回切换时 pill 宽度变化可接受，不出现跳动或文字被裁。
-- [ ] AC8 状态条顺序为 Activity → Usage → 子代理 → 上下文 → 齿轮，与用户开关无关（开关只控制显隐，不改顺序）。
-- [ ] AC9 `statusbar/statusbar.js` 与 `plugins/zcode-statusbar/statusbar.js` 同步（`python3 core/sync_plugin.py --check` 无漂移）。
-- [ ] AC10 `npm test` 全绿；`statusbar/CONTRACT.md` §7 与 `.trellis/spec/statusbar/ui-guidelines.md` 的 DOM 登记同步更新。
+- [x] AC1 activity / usage / gear 三个 pill 渲染 DeepSeek 字形，14px 下笔画清晰；子代理 pill 仍是三分叉图标。
+- [x] AC2 四个图标混排时生效描边一致（都是 1.4px），无某一个明显偏重或偏轻。
+- [x] AC3 子代理运行中：图标后出现绿色圆点并呼吸，圆点后是速度读数；pill 内不出现活跃数数字。
+- [x] AC4 子代理运行中数字本身静止；速度读数仍走 `speedColor()` 色阶，不因 R2 变绿。
+- [x] AC5 子代理闲态：无绿色点，显示会话累计 token，中性灰。
+- [x] AC6 面板内运行中行的状态点为绿色，已完成行为当前色半透明；分组标题仍带条目数。
+- [x] AC7 运行态与闲态来回切换时 pill 宽度变化可接受，不出现跳动或文字被裁。
+- [x] AC8 状态条顺序为 Activity → Usage → 子代理 → 上下文 → 齿轮，与用户开关无关（开关只控制显隐，不改顺序）。
+- [x] AC9 `statusbar/statusbar.js` 与 `plugins/zcode-statusbar/statusbar.js` 同步（`python3 core/sync_plugin.py --check` 无漂移）。
+- [x] AC10 `npm test` 全绿；`statusbar/CONTRACT.md` §7 与 `.trellis/spec/statusbar/ui-guidelines.md` 的 DOM 登记同步更新。
 
 ## Notes
 
