@@ -258,8 +258,7 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 2. **session 推送**：主进程调 `session-stats.cjs` 的 `aggregate(rows)`，经 `webContents.executeJavaScript`
    或桥转发为 window 事件 `zcode-statusbar:session`（detail = aggregate 返回对象，勿再包裹）。
 3. **轮结束自校准**（可选，**暂缓**）：内核在轮完成后调 `__ZCODE_STATUSBAR_TURN_API__.calibrateFromTurn({ outputTokens, charCount })`。
-   现状：内核拿不到每轮的流式字符数（DB 行无 charCount，渲染端轮结束信号未接），暂按默认 2 字符/token；
-   接线方案见 `.trellis/tasks/11-06-statusbar-design/research/acceptance-checklist.md`。
+   现状：内核拿不到每轮的流式字符数（DB 行无 charCount，渲染端轮结束信号未接），暂按默认 2 字符/token。
 4. **store 直喂**（可选，优先于 DOM 选择器）：内核暴露 `__ZCODE_STATUSBAR_STREAM_LENGTH__` 返回流式文本长度。
 5. **选择器校准**：`MOUNT_ANCHORS`（statusbar.js）、`STREAM_SELECTORS`（turn-stats.js）为启发式候选，
    需在实机登记宿主版本后校准；失效路径均为静默（不渲染/停采）。宿主锚点表见 §6。

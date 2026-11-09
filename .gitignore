@@ -36,10 +36,8 @@ Thumbs.db
 .vscode/
 *.swp
 
-# agent（.trellis 跟踪：任务档案/spec/调研是团队知识库，仅排除运行态与个人身份）
+# agent（.trellis 含任务档案/调研/会话 journal 与个人身份，仅本地使用，不入库）
 .claude
 .zcode
-.trellis/.developer
-.trellis/.runtime/
-.trellis/workspace/*/shell-tickets/
+.trellis/
 

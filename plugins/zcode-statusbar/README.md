@@ -19,4 +19,4 @@ ZCode 客户端状态条插件：在输入框下方以视觉化控件呈现生�
 - `hooks/` SessionStart 钩子（同步运行时、自动安装）
 - `../../core/` 接入内核（注入/剥离、loader、引擎补丁、更新 ZIP 预注入、Release 更新器、卸载编排）
 
-详见仓库根 README 与 `.trellis/tasks/11-06-statusbar-design/design.md`。
+详见仓库根 README。
