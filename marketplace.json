@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "ZCode 输入框下方状态条：生成速度色阶、累计 token、缓存命中、子代理状态与官方上下文圆环增强",
-    "version": "0.1.2"
+    "version": "0.1.3"
   },
   "plugins": [
     {
       "name": "zcode-statusbar",
       "source": "./plugins/zcode-statusbar",
       "description": "ZCode composer status bar: visual tok/s speed ramp, cumulative tokens, cache hit and subagent state under the input box, plus a color-ramp enhancement for the official context ring. Auto-installs via app.asar injection (fully quit and reopen ZCode to take effect). No per-answer text lines, no prompt-submit context injection, no cost/quota features; no network except the Release updater.",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "author": {
         "name": "zcode-statusbar contributors"
       },

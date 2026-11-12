@@ -1,4 +1,4 @@
-# CONTRACT — 状态条模块间契约（v0.1.2 基线）
+# CONTRACT — 状态条模块间契约（v0.1.3 基线）
 
 > 本文是 `turn-stats.js` / `session-stats.cjs` / `statusbar.js` 三者之间，以及它们与内核（接入内核、加载器）、
 > 与宿主 DOM 之间的接口契约。基线来源：design.md §9。实现中的偏差已在各模块顶部注释与本文 §8 登记供检查代理核对。
@@ -28,7 +28,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_TURN_API__` | turn-stats.js | 内核/诊断 | `{ setCharsPerToken(v), calibrateFromTurn({outputTokens, charCount}), reset(), stop() }`（自校准钩子） |
 | `__ZCODE_STATUSBAR_RAMP__` | 加载器（组装自 ramp.js） | statusbar.js | `{ speedColor(tokPerSec), contextColor(pct0to1) }`；缺失 → 数字与上下文圆环退中性灰 |
 | `__ZCODE_STATUSBAR_BRIDGE__` | 内核静态桥 | statusbar.js | `{ getPaneId(): string\|null, getSessionSnapshot(): object\|null, getContextBreakdown(): object\|null }`；身份不可确认时三者返回 null |
-| `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.1.2'`（与 package.json 同步） |
+| `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.1.3'`（与 package.json 同步） |
 | `__ZCODE_STATUSBAR_I18N__` | 加载器（可选） | statusbar.js | 文案覆盖对象，键见 statusbar.js 的 I18N 常量（宿主语言覆盖点） |
 | `__ZCODE_STATUSBAR_STREAM_TEXT__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本；优先于长度钩子与 DOM |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
@@ -297,5 +297,6 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 16 | 用量弹层三处调整：① 工具调用去掉合计行与每行错误计数（`tools.total`/`tools.errors`/`item.errors` 仍由聚合层产出，只是不渲染）；② 用量分组底部补「缓存占比」（会话口径 `cacheHitRate`）；③ 新增「今日用量」分组（`today` 块，全库口径）。 | 三个口径混在一个无分组边界的长列表里：合计行与每行尾部错误计数属噪音，而用户要看的是「本会话用量」与「今日用量」两块可比的读数；缓存命中率此前只在状态条 pill 上显示，弹层里看不到 | statusbar.js `buildUsageDetail` / `buildTodaySection`；§4.2 / §4.5 |
 | 17 | 速度优先相对耗时与有效 TTFT；排除无输出请求 | 修正前置等待拉低速度，同时保留队列 flush 保护；实时采样区分文字类型，空闲样本不刷新新鲜度；活动弹层 TPS 随条更新 | §4.1 / §4.3 |
 | 18（已由 19 替代） | 移除下沉负 margin；条底保留 8px 外边距，弹层距条 10px | 保留宿主 dock 留白，hover 区域不贴窗口边缘；替代偏差 13 | statusbar.js 样式 |
-| 19 | 上方默认 4px；按实际几何补偿最多 24px 的宿主底部留白，使条到窗口底边的距离等于条到输入框的距离 | 固定 8px 外边距叠加宿主 padding 后下方约 24px，上下失衡。只调整插件自身 margin，挂载、渲染与容器尺寸变化时重测；远离底部或无法测量时回退 CSS 默认 4px | statusbar.js `balanceDockGap`；截图舞台不再额外增加底部留白 |
+| 19（已由 21 替代） | 上方默认 4px；按实际几何补偿最多 24px 的宿主底部留白，使条到窗口底边的距离等于条到输入框的距离 | 固定 8px 外边距叠加宿主 padding 后下方约 24px，上下失衡。只调整插件自身 margin，挂载、渲染与容器尺寸变化时重测；远离底部或无法测量时回退 CSS 默认 4px | statusbar.js `balanceDockGap`；截图舞台不再额外增加底部留白 |
 | 20 | 修正字体栈被整体引号包裹的问题；详情使用 UI 字体栈（含 Segoe UI / 微软雅黑回退），标题使用 700 字重、比正文大 1px，分组增加细分隔线 | Windows 常见字体缺少 500 字重时标题可能与正文同重；通过字重、字号和分组间距共同表达层级。速度趋势也使用统一标题样式；宿主 `--font-sans` 可覆盖详情字体 | statusbar.js 样式与 `applyThemeVars` |
+| 21 | 以所属 `[data-session-id]` 面板内边缘为准，按输入框到状态条的间距（默认 4px）平衡底部；仅回收可由祖先 padding/border/margin 解释的尾部空白 | 移除窗口高度与 24px 阈值；面板外间隙保持原样，嵌套容器、缩放与上下分屏均在自己的面板内计算。存在后续流内容、未知占位或无法测量时回退正常流；观察 dock 到面板路径上的尺寸变化，宿主样式只读。官方输入框 `[data-v4-composer]` 优先于启发式锚点 | statusbar.js `dockBottomMargin` / `watchResize`；`npm run test:layout` 浏览器回归 |
