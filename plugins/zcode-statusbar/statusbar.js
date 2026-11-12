@@ -105,7 +105,8 @@
   // window.__ZCODE_STATUSBAR_I18N__ = { <key>: '译文', ... } 即可整键覆盖。
   var I18N = {
     estTip: '估算值：按字符增量推得，非精确 tok/s',
-    verifiedTip: '会话均：Σ输出 token ÷ Σ生成时长',
+    verifiedTip: '最近完成请求：输出 token ÷ 有效生成时长（与曲线末点同源）',
+    avgTps: '会话均速',
     usageTip: '累计 token 与缓存命中率（缓存已含在输入）',
     contextTip: '上下文占用：与官方面板同源，分母为完整 context window',
     subRunningTip: '子代理运行中 · 实时速度',
@@ -621,12 +622,14 @@
     else openPop(mode);
   }
 
-  // 子代理面板是唯一"活"的弹层：数据每秒都在变，冻结在打开那一刻就等于读数不动。
-  // 只在 subagent 模式且数据到达时重建，其余弹层保持"打开时快照"的既有行为。
-  // 重建保留 subView（列表/详情位置），所以详情页会随数据刷新而不是被踢回列表。
-  function refreshSubagentPop() {
-    if (popMode !== 'subagent' || !ui) return;
-    openPop('subagent');
+  // 活弹层：数据到达时重建，冻结在打开那一刻就等于读数不动。
+  // subagent 面板每秒都在变；activity 弹层的耗时、TPS 与趋势曲线同属会话聚合，
+  // 只更新其中一行会让新 TPS 与旧曲线并排出现。重建保留 subView（列表/详情位置），
+  // 所以详情页会随数据刷新而不是被踢回列表。其余弹层仍是打开时快照。
+  function refreshLivePop() {
+    if (!ui) return;
+    if (popMode === 'subagent') openPop('subagent');
+    else if (popMode === 'activity') openPop('activity');
   }
 
   function sectionTitle(pop, text) {
@@ -743,7 +746,7 @@
     var sp = currentSpeed();
     var rTps = el('div', 'zsb-row');
     rTps.appendChild(el('span', 'k', I18N.tps));
-    var tpsVal = el('span', 'v zsb-activity-speed', sp ? Math.round(sp.v) + ' tok/s' : '--');
+    var tpsVal = el('span', 'v zsb-activity-speed', speedText(sp && sp.v));
     if (sp) {
       var ramp = rampApi();
       tpsVal.style.color = (ramp && ramp.speedColor(sp.v)) || ''; // 与底部速度数字同色阶
@@ -751,6 +754,11 @@
     }
     rTps.appendChild(tpsVal);
     pop.appendChild(rTps);
+    // 会话均速单独一行：TPS 行是最近一段，这一行才是整场会话的加权均值。
+    var rAvg = el('div', 'zsb-row');
+    rAvg.appendChild(el('span', 'k', I18N.avgTps));
+    rAvg.appendChild(el('span', 'v zsb-activity-avg', speedText(sessionAvgSpeed())));
+    pop.appendChild(rAvg);
     var trendSec = el('div', 'zsb-sec');
     trendSec.appendChild(el('div', 'zsb-pop-title', I18N.trend));
     var trend = Array.isArray(s.speedTrend) ? s.speedTrend : [];
@@ -1304,17 +1312,34 @@
     return typeof detail.mine === 'string' && detail.mine ? detail.mine : null;
   }
 
-  // 当前速度读数：生成中（样本 3s 内新鲜）→ 估算态；否则 → 核实态（会话均）
+  // 当前速度读数：生成中（样本 3s 内新鲜）→ 估算态；
+  // 否则取最近一个完成请求的单段速度，与趋势曲线末点同源（会话均速另列一行）。
   function currentSpeed() {
     var t = state.turn;
     if (t && typeof t.tokPerSec === 'number' && isFinite(t.tokPerSec) && Date.now() - t.updatedAt < TURN_FRESH_MS) {
       return { v: t.tokPerSec, est: true };
     }
-    var s = state.session;
-    if (s && typeof s.sessionAvgTokPerSec === 'number' && isFinite(s.sessionAvgTokPerSec)) {
-      return { v: s.sessionAvgTokPerSec, est: false };
+    var trend = state.session && Array.isArray(state.session.speedTrend) ? state.session.speedTrend : [];
+    for (var i = trend.length - 1; i >= 0; i--) {
+      var p = trend[i];
+      if (p && typeof p.tokPerSec === 'number' && isFinite(p.tokPerSec)) return { v: p.tokPerSec, est: false };
     }
+    // 旧内核帧没有 speedTrend（normalizeSession 兼容的裸 aggregate 路径）：
+    // 此时唯一可信读数就是会话均速，宁可退回它也不显 --。
+    var avg = sessionAvgSpeed();
+    if (avg != null) return { v: avg, est: false };
     return null;
+  }
+
+  // 会话均速读数：Σ输出 ÷ Σ有效生成窗，跨全部完成请求而不是最近一段。
+  function sessionAvgSpeed() {
+    var s = state.session;
+    var v = s && s.sessionAvgTokPerSec;
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  }
+
+  function speedText(v) {
+    return v == null ? '--' : Math.round(v) + ' tok/s';
   }
 
   function render() {
@@ -1717,7 +1742,7 @@
       if (d) {
         state.session = d;
         render();
-        refreshSubagentPop(); // 面板开着时随之刷新（子代理读数每秒都在变）
+        refreshLivePop(); // 活弹层跟着刷新（子代理读数、活动耗时与曲线都在变）
       }
     });
 

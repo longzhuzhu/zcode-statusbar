@@ -298,7 +298,7 @@ test('无数据时 TPS 行显 --、趋势区空态兜底', () => {
 });
 
 
-test('活动弹层打开时 TPS 随实时样本刷新，并切回会话均值', () => {
+test('活动弹层打开时 TPS 随实时样本刷新，过期后回落到完成请求速度', () => {
   const env = loadStatusbar();
   env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:session', { detail: sessionDetail() }));
   const pop = mountActivityPop(env);
@@ -310,4 +310,111 @@ test('活动弹层打开时 TPS 随实时样本刷新，并切回会话均值', 
     detail: { tokPerSec: 0, estimated: true, updatedAt: Date.now() - 4000 },
   }));
   assert.ok(fullText(pop).includes('118 tok/s'));
+});
+
+// 两个完成请求：各 100s 窗，输出 1000 / 5000 → 单段 10 / 50，会话均速 6000/200s = 30。
+function twoRequestDetail() {
+  const { aggregate } = require('../statusbar/session-stats.cjs');
+  const base = {
+    kind: 'model',
+    isSubagent: false,
+    model: 'glm-test',
+    thinking: false,
+    status: 'completed',
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  return {
+    aggregate: aggregate([
+      Object.assign({}, base, {
+        id: 'slow',
+        startedAt: 1_000,
+        firstTokenAt: 1_500,
+        completedAt: 101_000,
+        outputTokens: 1_000,
+      }),
+      Object.assign({}, base, {
+        id: 'fast',
+        startedAt: 101_000,
+        firstTokenAt: 101_500,
+        completedAt: 201_000,
+        outputTokens: 5_000,
+      }),
+    ]),
+  };
+}
+
+function valueOf(pop, cls) {
+  const node = pop.querySelector('.' + cls);
+  assert.ok(node, cls + ' 行存在');
+  return node.textContent;
+}
+
+test('TPS 行取最近完成请求速度，会话均速单独成行', () => {
+  const env = loadStatusbar();
+  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:session', { detail: twoRequestDetail() }));
+
+  const pop = mountActivityPop(env);
+  assert.equal(valueOf(pop, 'zsb-activity-speed'), '50 tok/s', 'TPS = 最近完成请求（与趋势末点同源）');
+  assert.equal(valueOf(pop, 'zsb-activity-avg'), '30 tok/s', '会话均速 = Σ输出 ÷ Σ有效窗');
+
+  const bar = env.host.children.find((n) => n.className === 'zsb-bar');
+  const actPill = bar.children.find((n) => n.dataset && n.dataset.zsbPill === 'activity');
+  assert.ok(fullText(actPill).includes('50 tok/s'), '底部速度数字与 TPS 行同源');
+});
+
+test('旧内核帧缺 speedTrend 时回退会话均速，不显 --', () => {
+  const env = loadStatusbar();
+  env.window.dispatchEvent(
+    new env.window.CustomEvent('zcode-statusbar:session', {
+      detail: { aggregate: { turns: 1, steps: 2, sessionAvgTokPerSec: 42, totalTokens: 100 } },
+    })
+  );
+  const pop = mountActivityPop(env);
+  assert.equal(valueOf(pop, 'zsb-activity-speed'), '42 tok/s');
+  assert.equal(valueOf(pop, 'zsb-activity-avg'), '42 tok/s');
+});
+
+test('活动弹层随新聚合帧刷新耗时与曲线，不冻结在打开时刻', () => {
+  const { aggregate } = require('../statusbar/session-stats.cjs');
+  const base = {
+    kind: 'model',
+    isSubagent: false,
+    model: 'glm-test',
+    thinking: false,
+    status: 'completed',
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  const first = Object.assign({}, base, {
+    id: 'a',
+    startedAt: 1_000,
+    firstTokenAt: 1_500,
+    completedAt: 101_000,
+    outputTokens: 1_000,
+  });
+  const second = Object.assign({}, base, {
+    id: 'b',
+    startedAt: 101_000,
+    firstTokenAt: 101_500,
+    completedAt: 201_000,
+    outputTokens: 5_000,
+  });
+
+  const env = loadStatusbar();
+  const push = (rows) =>
+    env.window.dispatchEvent(
+      new env.window.CustomEvent('zcode-statusbar:session', { detail: { aggregate: aggregate(rows) } })
+    );
+
+  push([first]);
+  const pop = mountActivityPop(env);
+  assert.ok(fullText(pop).includes('1分40秒'), '打开时耗时来自首帧');
+  assert.ok(pop.querySelector('.zsb-trend').innerHTML.includes('>10 tok/s</text>'), '打开时曲线末点为 10');
+
+  push([first, second]);
+  assert.ok(fullText(pop).includes('3分20秒'), '新聚合帧到达后耗时随之刷新');
+  assert.ok(pop.querySelector('.zsb-trend').innerHTML.includes('>50 tok/s</text>'), '新聚合帧到达后曲线随之刷新');
 });

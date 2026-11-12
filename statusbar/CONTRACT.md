@@ -54,11 +54,16 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 { tokPerSec: number, estimated: true, updatedAt: number /* ms */ }
 ```
 
-- `estimated` 恒为 true（本模块只产估算值）；核实值来自 session 数据的 `sessionAvgTokPerSec`。
+- `estimated` 恒为 true（本模块只产估算值）；核实值来自 session 数据的 `speedTrend` 末点。
 - 无增量 → `tokPerSec` 归零（不冻结旧值）；文本回落 → 视为新轮重置窗口。
-- `updatedAt` 是最近文本增量时间，空闲 tick 不刷新它，3s 后 UI 回到会话均值。
+- `updatedAt` 是最近文本增量时间，空闲 tick 不刷新它，3s 后 UI 回到最近完成请求速度。
 - DOM 文本按中日韩字符约 1 字/token、ASCII 约 4 字/token、其余 Unicode 约 2 字/token 估算；仍非分词器精确值。显式校准后使用 charCount/outputTokens 系数。长度钩子保留默认 2 字/token。
 - statusbar 侧新鲜度：`Date.now() - updatedAt < 3000ms` 视为"生成中"（估算态），否则切回核实态。
+
+**核实态取最近完成请求，会话均值另列。** 底部速度数字与活动弹层 TPS 行同读
+`speedTrend` 末点，因此与趋势曲线右端标注恒等；整场会话的加权均值
+`sessionAvgTokPerSec` 在弹层里单独一行「会话均速」。两者口径不同，不可互相替代：
+前者回答"最近一段多快"，后者回答"整场平均多快"，后者分母含历史各请求的完整耗时。
 
 ### 4.2 session 数据（`zcode-statusbar:session` detail = `{ ...zusage 快照, aggregate }`）
 
@@ -327,3 +332,5 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 19（已由 21 替代） | 上方默认 4px；按实际几何补偿最多 24px 的宿主底部留白，使条到窗口底边的距离等于条到输入框的距离 | 固定 8px 外边距叠加宿主 padding 后下方约 24px，上下失衡。只调整插件自身 margin，挂载、渲染与容器尺寸变化时重测；远离底部或无法测量时回退 CSS 默认 4px | statusbar.js `balanceDockGap`；截图舞台不再额外增加底部留白 |
 | 20 | 修正字体栈被整体引号包裹的问题；详情使用 UI 字体栈（含 Segoe UI / 微软雅黑回退），标题使用 700 字重、比正文大 1px，分组增加细分隔线 | Windows 常见字体缺少 500 字重时标题可能与正文同重；通过字重、字号和分组间距共同表达层级。速度趋势也使用统一标题样式；宿主 `--font-sans` 可覆盖详情字体 | statusbar.js 样式与 `applyThemeVars` |
 | 21 | 以所属 `[data-session-id]` 面板内边缘为准，按输入框到状态条的间距（默认 4px）平衡底部；仅回收可由祖先 padding/border/margin 解释的尾部空白 | 移除窗口高度与 24px 阈值；面板外间隙保持原样，嵌套容器、缩放与上下分屏均在自己的面板内计算。存在后续流内容、未知占位或无法测量时回退正常流；观察 dock 到面板路径上的尺寸变化，宿主样式只读。官方输入框 `[data-v4-composer]` 优先于启发式锚点 | statusbar.js `dockBottomMargin` / `watchResize`；`npm run test:layout` 浏览器回归 |
+| 22 | 底部速度数字与活动弹层 TPS 改取 `speedTrend` 末点；`sessionAvgTokPerSec` 挪到弹层独立行「会话均速」 | 两处读数此前分别是会话加权均值与趋势末点，同一弹层里印出 14 与 50 两个 tok/s，用户无法判断哪个是当前速度。均值会被历史长请求（含客户端准入/重试等待）长期压低，不适合当"当前速度"；改为与曲线末点同源后两处恒等，均值保留为独立可比值 | statusbar.js `currentSpeed` / `sessionAvgSpeed` / `buildActivityDetail`；§4.1 |
+| 23 | 活动弹层改为活弹层：session 帧到达时与子代理面板一样重建 | 原实现只在打开时生成 timing 与趋势曲线，之后仅更新 TPS 一行，于是新 TPS 与旧曲线、旧耗时并排显示，关掉重开才同步。重建走 `openPop` 复用同一套装配，避免为三个字段写增量更新路径 | statusbar.js `refreshLivePop`；测试「活动弹层随新聚合帧刷新耗时与曲线」 |
