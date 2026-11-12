@@ -31,7 +31,7 @@
 
   // ================= 配置常量区 =================
 
-  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.1.2');
+  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.1.3');
 
   // 估算态时效：turn 样本 updatedAt 超过此时长即认为本轮生成结束，切回核实态（会话均）
   var TURN_FRESH_MS = 3000;
@@ -43,6 +43,7 @@
   // ZCode 宿主 DOM 未公开稳定锚点，候选为启发式，需实机校准。
   var MOUNT_ANCHORS = [
     '[data-zcode-composer]', // 未来官方/内核预留标记（乐观候选）
+    '[data-v4-composer]',
     'form[class*="composer" i]',
     '[class*="composer" i]',
     '[class*="prompt-editor" i]',
@@ -1259,23 +1260,60 @@
     fitSpan = pillsSpan(); // 记录收敛后的跨度，作为下一轮的稳态判据
   }
 
-  function balanceDockGap() {
-    if (!ui || !mountAnchor || !W.innerHeight || !W.getComputedStyle) return;
+  function hasFlowContentAfter(node) {
+    for (var next = node.nextSibling; next; next = next.nextSibling) {
+      if (next.nodeType === 3 && /\S/.test(next.textContent || '')) return true;
+      if (next.nodeType !== 1) continue;
+      var cs = W.getComputedStyle(next);
+      if (cs.display === 'none' || cs.position === 'absolute' || cs.position === 'fixed') continue;
+      var box = next.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0) return true;
+    }
+    return false;
+  }
+
+  function dockBottomMargin(bar, anchor) {
     try {
-      var bar = ui.bar;
+      var pane = anchor.closest(SESSION_SELECTOR);
+      if (!pane || !pane.contains(bar)) return null;
       var box = bar.getBoundingClientRect();
-      var topGap = box.top - mountAnchor.getBoundingClientRect().bottom;
+      var scale = box.height / bar.offsetHeight;
+      if (!(scale > 0) || !isFinite(scale)) return null;
+      var gap = (box.top - anchor.getBoundingClientRect().bottom) / scale;
       var margin = parseFloat(W.getComputedStyle(bar).marginBottom);
-      var dockGap = W.innerHeight - box.bottom - margin;
-      // 只补偿窗口底部已知大小的 dock 留白，避免浮动/嵌入布局产生过大的负 margin。
-      if (!isFinite(topGap) || !isFinite(margin) || !isFinite(dockGap) || topGap < 0 || dockGap < -0.5 || dockGap > 24) {
-        if (bar.style.marginBottom) bar.style.marginBottom = '';
-        return;
+      if (!isFinite(gap) || gap < 0 || !isFinite(margin)) return null;
+
+      var inset = 0;
+      var node = bar;
+      while (node !== pane) {
+        if (hasFlowContentAfter(node)) return null;
+        var parent = node.parentElement;
+        if (!parent) return null;
+        var cs = W.getComputedStyle(parent);
+        inset += parseFloat(cs.paddingBottom) || 0;
+        if (parent !== pane) inset += parseFloat(cs.borderBottomWidth) || 0;
+        if (node !== bar) inset += parseFloat(W.getComputedStyle(node).marginBottom) || 0;
+        node = parent;
       }
-      var next = topGap - Math.max(0, dockGap);
-      if (Math.abs(next - margin) > 0.5) bar.style.marginBottom = next + 'px';
+      var paneStyle = W.getComputedStyle(pane);
+      var bottom = pane.getBoundingClientRect().bottom - (parseFloat(paneStyle.borderBottomWidth) || 0) * scale;
+      var measuredInset = (bottom - box.bottom) / scale - margin;
+      // 只回收能由面板内部 padding/border/margin 解释的空白，不占用外框间隙或未识别的内容区。
+      if (!isFinite(inset) || !isFinite(measuredInset) || Math.abs(measuredInset - inset) > 1) return null;
+      return gap - inset;
     } catch (e) {
-      /* 无布局信息时保留 CSS 默认间距 */
+      return null;
+    }
+  }
+
+  function balanceDockGap() {
+    if (!ui || !mountAnchor || !W.getComputedStyle) return;
+    var bar = ui.bar;
+    var next = dockBottomMargin(bar, mountAnchor);
+    if (next == null) {
+      if (bar.style.marginBottom) bar.style.marginBottom = '';
+    } else if (Math.abs(next - parseFloat(W.getComputedStyle(bar).marginBottom)) > 0.5) {
+      bar.style.marginBottom = next + 'px';
     }
   }
 
@@ -1656,7 +1694,11 @@
         fitBar();
         balanceDockGap();
       });
-      resizeObserver.observe(target);
+      var pane = mountAnchor && mountAnchor.closest(SESSION_SELECTOR);
+      for (var node = target; node; node = node.parentElement) {
+        resizeObserver.observe(node);
+        if (node === pane) break;
+      }
     } catch (e) {
       resizeObserver = null; // 观察失败：退回周期渲染路径
     }

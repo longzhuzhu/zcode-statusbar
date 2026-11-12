@@ -120,6 +120,8 @@ ZCode 升级会覆盖 `app.asar`，状态条消失时重跑一次 `core/install.
 
 完整字段与口径在 [statusbar/CONTRACT.md](statusbar/CONTRACT.md)。
 
+状态栏间距以所属会话面板的内边缘为准，上下默认各 4px；窗口与会话面板之间的外框留白保持原样。嵌套容器和分屏各自计算，不依赖整个窗口的底边。
+
 ## 它改了你的什么
 
 这条需要说清楚，因为接入方式不是官方接口。
@@ -173,9 +175,13 @@ node --test tests/*.test.cjs                            # UI 与聚合逻辑
 python3 -m unittest discover -s tests -p '*.py' -t .    # 内核、安装、卸载
 python3 core/install.py --dev                           # 注入直指仓库，改文件即时生效
 node scripts/render-statusbar.mjs                       # 重新生成 README 里的截图
+npm ci                                                  # 安装开发用浏览器测试依赖
+npm run test:layout                                     # 会话面板布局回归（需 Chrome/Chromium）
 ```
 
 `--dev` 模式不复制运行时，注入行指向克隆目录，改完 `statusbar/statusbar.js` 刷新窗口就能看到效果。切回标准安装，再跑一次不带 `--dev` 的。
+
+布局回归使用 Playwright 和本机 Chrome/Chromium，覆盖面板外间隙、嵌套容器、缩放、分屏、页脚和动态重挂。找不到浏览器时同样通过 `CHROME_PATH` 指定；这些依赖仅用于开发，不影响插件安装与运行。
 
 截图脚本加载的是仓库里的真 `statusbar/statusbar.js`，数据经真 `statusbar/session-stats.cjs` 聚合。改了 UI 重跑一次，图跟着变。脚本会自己找本机的 Chrome 或 Chromium，找不到时用 `CHROME_PATH` 指定。
 

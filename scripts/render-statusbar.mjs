@@ -230,9 +230,12 @@ function pageHtml(theme, view) {
   html, body { height: 100%; }
   .stage {
     display: flex; flex-direction: column; justify-content: flex-end;
-    min-height: 100%; padding: 20px 24px 0;
+    min-height: 100%; padding: 20px 24px 8px;
   }
-  .pane { width: 100%; min-width: 0; max-width: 720px; margin: 0 auto; }
+  .pane { width: 100%; min-width: 0; max-width: 720px; margin: 0 auto;
+    border: 1px solid ${dark ? 'rgba(255,255,255,.12)' : 'rgba(0,0,0,.1)'};
+    border-radius: 16px; padding: 8px 8px 4px;
+  }
   .bubble {
     background: ${dark ? '#25262a' : '#f6f7f8'};
     border-radius: 12px; padding: 12px 16px; margin-bottom: 10px;
@@ -255,10 +258,10 @@ function pageHtml(theme, view) {
   .hidden-usage { display: none; }
 </style></head>
 <body>
-<div class="stage"><div class="pane">
+<div class="stage"><div class="pane" data-session-id="sess_demo">
   <div class="bubble">帮我核对一下状态条的聚合口径，顺便看看上下文现在用了多少。</div>
   <div class="bubble me">好的，我先读一遍 CONTRACT。</div>
-  <div class="dock" data-session-id="sess_demo">
+  <div class="dock">
     <div class="hidden-usage" data-usage-used="${CONTEXT.used}" data-usage-max="${CONTEXT.size}"></div>
     <div data-zcode-composer class="composer">输入消息…</div>
   </div>
@@ -321,30 +324,35 @@ function shoot(file, html, size) {
   return out;
 }
 
-fs.mkdirSync(OUT_DIR, { recursive: true });
+export { pageHtml, CHROME };
 
-const written = [];
-for (const theme of ['light', 'dark']) {
-  written.push(shoot('bar-' + theme, pageHtml(theme, 'bar'), '800,270'));
-}
-const PANEL_HEIGHT = { activity: 470, usage: 730, context: 400, subagent: 450, menu: 600 };
-for (const view of Object.keys(PANEL_HEIGHT)) {
-  written.push(shoot('panel-' + view, pageHtml('light', view), '800,' + PANEL_HEIGHT[view]));
-}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
 
-console.log(
-  JSON.stringify(
-    {
-      turns: SESSION.turns,
-      steps: SESSION.steps,
-      totalTokens: SESSION.totalTokens,
-      cacheHitRate: SESSION.cacheHitRate,
-      sessionAvgTokPerSec: SESSION.sessionAvgTokPerSec,
-      subagents: SESSION.subagent.list.length,
-      active: SESSION.subagent.activeCount,
-      written,
-    },
-    null,
-    2
-  )
-);
+  const written = [];
+  for (const theme of ['light', 'dark']) {
+    written.push(shoot('bar-' + theme, pageHtml(theme, 'bar'), '800,270'));
+  }
+  const PANEL_HEIGHT = { activity: 470, usage: 730, context: 400, subagent: 450, menu: 600 };
+  for (const view of Object.keys(PANEL_HEIGHT)) {
+    written.push(shoot('panel-' + view, pageHtml('light', view), '800,' + PANEL_HEIGHT[view]));
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        turns: SESSION.turns,
+        steps: SESSION.steps,
+        totalTokens: SESSION.totalTokens,
+        cacheHitRate: SESSION.cacheHitRate,
+        sessionAvgTokPerSec: SESSION.sessionAvgTokPerSec,
+        subagents: SESSION.subagent.list.length,
+        active: SESSION.subagent.activeCount,
+        written,
+      },
+      null,
+      2
+    )
+  );
+
+}
