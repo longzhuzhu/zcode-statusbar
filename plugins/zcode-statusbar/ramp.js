@@ -41,10 +41,10 @@ const NEUTRAL_COLOR = '#8c8c8c';
  * 按需求把极快档压缩到 500 封顶。锚点色值为合理缺省，待实机深浅主题对比度校验后固化。
  */
 const SPEED_ANCHORS = Object.freeze([
-  Object.freeze({ v: 0, c: '#e5484d' }),   // 红：极慢
-  Object.freeze({ v: 150, c: '#46a758' }), // 绿：正常
-  Object.freeze({ v: 300, c: '#0090ff' }), // 蓝：快
-  Object.freeze({ v: 500, c: '#8e4ec6' }), // 紫：极快（≥500 封顶）
+  Object.freeze({ v: 0, c: '#ce3038' }),   // 红：极慢
+  Object.freeze({ v: 150, c: '#27853d' }), // 绿：正常
+  Object.freeze({ v: 300, c: '#0879d1' }), // 蓝：快
+  Object.freeze({ v: 500, c: '#7c3db0' }), // 紫：极快（≥500 封顶）
 ]);
 
 /**
@@ -54,10 +54,10 @@ const SPEED_ANCHORS = Object.freeze([
  * 锚点色值为合理缺省，待实机深浅主题对比度校验后固化。
  */
 const CONTEXT_ANCHORS = Object.freeze([
-  Object.freeze({ p: 0, c: '#46a758' }),   // 绿：空
-  Object.freeze({ p: 0.5, c: '#ffb224' }), // 黄：半满
-  Object.freeze({ p: 0.9, c: '#e5484d' }), // 红：临界
-  Object.freeze({ p: 1, c: '#a4133c' }),   // 深红：满（临终警示）
+  Object.freeze({ p: 0, c: '#27853d' }),   // 绿：空
+  Object.freeze({ p: 0.5, c: '#bd7900' }), // 黄：半满
+  Object.freeze({ p: 0.9, c: '#ce3038' }), // 红：临界
+  Object.freeze({ p: 1, c: '#901035' }),   // 深红：满（临终警示）
 ]);
 
 /* ============================ 内部工具 ============================ */

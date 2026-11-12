@@ -2,14 +2,14 @@
  * turn-stats.js —— 生成中速度采样（renderer 注入 IIFE，无模块系统）
  *
  * 契约（详见 statusbar/CONTRACT.md）：
- * - 产出 window.__ZCODE_STATUSBAR_TURN__ = { tokPerSec, estimated: true, updatedAt }（updatedAt 为 ms 时间戳）。
+ * - 产出 window.__ZCODE_STATUSBAR_TURN__ = { tokPerSec, estimated: true, updatedAt }（updatedAt 为最近增量的 ms 时间戳）。
  * - 每次采样同时派发 window 事件 "zcode-statusbar:turn"（detail 同上对象）。
  * - 自校准钩子：window.__ZCODE_STATUSBAR_TURN_API__ = { setCharsPerToken, calibrateFromTurn, reset, stop }。
- * - 采样：约 2s 滑动窗、100ms tick；速度 = 字符增量 ÷ 每 token 字符数（默认 2）÷ 窗口秒数。
+ * - 采样：约 2s 滑动窗、100ms tick；文本按文字类型估算 token，长度钩子默认 2 字/token。
  * - 无增量 → 速度归零（不冻结旧值）；文本长度回落视为新一轮开始，重置窗口。
  * - 字符来源优先级：
- *   1. window.__ZCODE_STATUSBAR_STREAM_LENGTH__()（内核桥直喂 store 文本长度，若提供则优先）；
- *   2. DOM 选择器（STREAM_SELECTORS，取最后一个命中节点的 textContent.length，选择器失效 → 静默停采）。
+ *   1. window.__ZCODE_STATUSBAR_STREAM_TEXT__() 或 window.__ZCODE_STATUSBAR_STREAM_LENGTH__()（内核桥直喂 store 文本长度，若提供则优先）；
+ *   2. DOM 选择器（STREAM_SELECTORS，取最后一个命中节点的 textContent，选择器失效 → 静默停采）。
  * - estimated 恒为 true：本模块只产估算值，核实值（会话均）由 session-stats.cjs 口径提供。
  *
  * 与 design.md §9 契约的偏差（供检查代理核对）：
@@ -50,10 +50,21 @@
     return n;
   }
 
+  function estimateTokens(text) {
+    var tokens = 0;
+    for (var ch of text) {
+      var cp = ch.codePointAt(0);
+      if ((cp >= 0x2e80 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7af) ||
+          (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0x20000 && cp <= 0x323af)) tokens += 1;
+      else tokens += cp <= 0x7f ? 0.25 : 0.5;
+    }
+    return tokens;
+  }
+
   /**
    * 采样器工厂（纯逻辑，DOM 无关；依赖经 opts 注入，便于单测）。
    * @param {Object} [opts]
-   * @param {Function} [opts.readLength] 读取当前流式文本长度；返回 null 表示本轮不可读（静默跳过）
+   * @param {Function} [opts.readLength] 读取当前流式文本或长度；返回 null 表示本轮不可读（静默跳过）
    * @param {Function} [opts.now]         时钟（ms）
    * @param {Function} [opts.publish]     样本发布回调（默认由浏览器装配写入全局并派发事件）
    * @param {number}   [opts.charsPerToken] 每 token 字符数（默认 2）
@@ -64,15 +75,33 @@
     var now = typeof opts.now === 'function' ? opts.now : function () { return Date.now(); };
     var publish = typeof opts.publish === 'function' ? opts.publish : function () {};
     var charsPerToken = clampCharsPerToken(opts.charsPerToken != null ? opts.charsPerToken : CONSTANTS.DEFAULT_CHARS_PER_TOKEN);
+    var calibrated = opts.charsPerToken != null;
+    var lastGrowthAt = null;
+    var lastText = '';
+    var textTokens = 0;
+
+    function readValue() {
+      var value = readLength();
+      if (typeof value === 'string') {
+        if (calibrated) return value.length / charsPerToken;
+        if (value !== lastText) {
+          textTokens = value.startsWith(lastText) ? textTokens + estimateTokens(value.slice(lastText.length)) : estimateTokens(value);
+          lastText = value;
+        }
+        return textTokens;
+      }
+      return typeof value === 'number' && isFinite(value) && value >= 0 ? value / charsPerToken : null;
+    }
 
     var samples = []; // 升序 [{ t, len }]，samples[0] 为增量基线
     var lastSample = null;
 
     /** 重置窗口：以当前可读长度为新基线（新一轮/口径切换时调用） */
     function reset() {
-      var len = readLength();
+      var len = readValue();
       samples = len == null ? [] : [{ t: now(), len: len }];
       lastSample = null;
+      lastGrowthAt = now();
     }
 
     /**
@@ -80,10 +109,11 @@
      * 返回本次发布的样本（未发布时返回 null）。
      */
     function tick() {
-      var len = readLength();
+      var len = readValue();
       if (len == null) return null; // 不可读 → 静默（不发布、不误归零其他来源）
       var t = now();
       var last = samples.length ? samples[samples.length - 1] : null;
+      if (!last || len > last.len) lastGrowthAt = t;
 
       if (last && len < last.len) {
         // 文本回落：新一轮/消息切换，重置窗口（速度自然归零）
@@ -91,8 +121,8 @@
         // reset 已读一次，此处直接以新基线继续
       } else {
         samples.push({ t: t, len: len });
-        // 淘汰窗外样本：基线必须落在窗口内；窗口内无更早样本时 delta=0 → 速度归零
-        while (samples.length > 1 && samples[0].t < t - CONSTANTS.WINDOW_MS) samples.shift();
+        // 保留跨过窗口左界的基线，避免低频/批量更新时丢掉整段增量。
+        while (samples.length > 2 && samples[1].t <= t - CONSTANTS.WINDOW_MS) samples.shift();
       }
 
       var oldest = samples[0];
@@ -105,10 +135,10 @@
       } else if (dt <= 0) {
         return null; // 同刻突增（消息切换）：留待下一 tick 再算，避免除零/尖峰
       } else {
-        tokPerSec = delta / charsPerToken / dt;
+        tokPerSec = delta / dt;
       }
 
-      lastSample = { tokPerSec: tokPerSec, estimated: true, updatedAt: t };
+      lastSample = { tokPerSec: tokPerSec, estimated: true, updatedAt: lastGrowthAt == null ? t : lastGrowthAt };
       publish(lastSample);
       return lastSample;
     }
@@ -116,6 +146,7 @@
     /** 设置每 token 字符数（自校准钩子；钳制到合理区间） */
     function setCharsPerToken(v) {
       charsPerToken = clampCharsPerToken(v);
+      calibrated = true;
       reset(); // 避免窗内混用两种换算系数
       return charsPerToken;
     }
@@ -156,6 +187,11 @@
     var lastReadAt = 0; // 最近一次成功读到长度的时间
 
     function readLength() {
+      var textHook = global.__ZCODE_STATUSBAR_STREAM_TEXT__;
+      if (typeof textHook === 'function') {
+        var text = textHook();
+        return typeof text === 'string' ? text : null;
+      }
       // 优先内核直喂钩子（store 长度，绕过 DOM）
       var hook = global.__ZCODE_STATUSBAR_STREAM_LENGTH__;
       if (typeof hook === 'function') {
@@ -176,7 +212,7 @@
           if (nodes.length) {
             dirty = false;
             lastReadAt = Date.now();
-            return nodes[nodes.length - 1].textContent.length;
+            return nodes[nodes.length - 1].textContent;
           }
         } catch (e) {
           /* 选择器非法：跳过该候选，静默 */
@@ -240,6 +276,6 @@
 
   // node:test 环境导出（偏差已记录于文件头）
   if (typeof module !== 'undefined' && module.exports && typeof global.window === 'undefined') {
-    module.exports = { createTurnSampler: createTurnSampler, CONSTANTS: CONSTANTS };
+    module.exports = { createTurnSampler: createTurnSampler, estimateTokens: estimateTokens, CONSTANTS: CONSTANTS };
   }
 })(typeof window !== 'undefined' ? window : globalThis);

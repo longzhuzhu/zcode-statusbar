@@ -30,6 +30,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_BRIDGE__` | 内核静态桥 | statusbar.js | `{ getPaneId(): string\|null, getSessionSnapshot(): object\|null, getContextBreakdown(): object\|null }`；身份不可确认时三者返回 null |
 | `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.1.0'`（与 package.json 同步） |
 | `__ZCODE_STATUSBAR_I18N__` | 加载器（可选） | statusbar.js | 文案覆盖对象，键见 statusbar.js 的 I18N 常量（宿主语言覆盖点） |
+| `__ZCODE_STATUSBAR_STREAM_TEXT__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本；优先于长度钩子与 DOM |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
 | `__ZCODE_STATUSBAR_STREAM_SELECTORS__` | 内核/诊断（可选） | turn-stats.js | 数组，覆盖默认 DOM 选择器候选 |
 | `__ZCODE_STATUSBAR_DIAG__` | statusbar.js | 内核（diag 轮询） | `{ version, stage, ts, mounted, paneId, lastError, hasBridge, hasRamp, hasTurn, hasSession }`；挂载各分支实时更新，供 `diag-<n>.json` 落盘 |
@@ -55,6 +56,8 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 
 - `estimated` 恒为 true（本模块只产估算值）；核实值来自 session 数据的 `sessionAvgTokPerSec`。
 - 无增量 → `tokPerSec` 归零（不冻结旧值）；文本回落 → 视为新轮重置窗口。
+- `updatedAt` 是最近文本增量时间，空闲 tick 不刷新它，3s 后 UI 回到会话均值。
+- DOM 文本按中日韩字符约 1 字/token、ASCII 约 4 字/token、其余 Unicode 约 2 字/token 估算；仍非分词器精确值。显式校准后使用 charCount/outputTokens 系数。长度钩子保留默认 2 字/token。
 - statusbar 侧新鲜度：`Date.now() - updatedAt < 3000ms` 视为"生成中"（估算态），否则切回核实态。
 
 ### 4.2 session 数据（`zcode-statusbar:session` detail = `{ ...zusage 快照, aggregate }`）
@@ -72,7 +75,7 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
   tokens: { input, output, cacheRead, cacheWrite },  // R6 Usage 弹层分项
   timing: { modelTimeMs, toolTimeMs, ttftMs },       // R6 Activity 弹层；ttftMs = 均值
   speedTrend: [{ t: number, tokPerSec: number }],    // 最近 ≤10 个完成请求，t = completedAt；
-                                  // tokPerSec 与 sessionAvgTokPerSec 同口径（单请求 = output ÷ (completedAt−startedAt)）
+                                  // tokPerSec 与 sessionAvgTokPerSec 同口径（单请求 = output ÷ 有效生成窗（§4.3））
   subagent: {
     activeCount: number,          // status==='running' 的子代理数（按 list 统计，含仅有投影行的运行中条目）
     activeTokPerSec: number|null, // 运行中子代理 Σ输出 ÷ Σ(now−首字) ，200ms 下限
@@ -106,11 +109,13 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
   kind: 'model' | 'tool' | 'subagent',  // 'model' 缺省；'subagent' 见 §4.3.1
   isSubagent: boolean,              // 缺省 false
   model: string,
-  thinking: boolean,                // 思考请求标记；仅供展示，不参与速度窗口选择
+  thinking: boolean,                // 思考请求标记；保留首字前思考阶段
   status: 'running' | 'completed' | 'error',  // 仅 'completed' 计入完成态（严格判定）
   startedAt: number,                // ms
-  firstTokenAt: number|null,        // 首字时间；仅供 TTFT，不参与速度窗口（见下方口径）
+  firstTokenAt: number|null,        // 首字时间；仅供旧库 TTFT 展示，不用于缩窗
   completedAt: number|null,
+  durationMs: number|null,           // model 行：宿主相对请求耗时；旧库缺列为 null
+  ttftMs: number|null,               // model 行：宿主相对首字延迟；旧库缺列为 null
   inputTokens: number,              // 含缓存（cache_read/cache_write 已在内）
   outputTokens: number,
   cacheReadTokens: number,
@@ -121,11 +126,12 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
 }
 ```
 
-口径（R2/R5）：有效生成窗 200ms ≤ 窗 < 1h；生成窗一律取 `completed_at − started_at`
-（整段请求跨度）。不按 `first_token_at` 缩窗：宿主该列由流式事件时间戳得出，而该时间戳在
-写队列 flush 时才赋值，实测落在请求跨度的 97%–100% 处（1501 条请求里 632 条首字窗不足
-30ms），按它缩窗会把 50 tok/s 的请求算成上万 tok/s，`speedTrend` 因此虚高到 5927 tok/s。
-子代理不计入主口径任何字段。
+口径（R2/R5）：有效生成窗 200ms ≤ 窗 < 1h；优先用正的 `durationMs`，缺失时回退
+`completedAt − startedAt`。普通输出扣除有效 `ttftMs`；`thinking` 或 Claude 请求保留完整
+思考阶段（output 已含思考 token）。TTFT 为负、非有限、占总时长 ≥97%，或扣除后窗口
+不足 200ms 时回退完整请求耗时，避免旧宿主队列 flush 时间被误当首字时间。
+不使用 `firstTokenAt` 缩窗。缺失、非有限或非正输出不参与速度分子与分母。
+会话均值、趋势和子代理完成态共用此窗口选择；模型总用时仍保留完整请求跨度。
 
 #### 4.3.1 `kind='subagent'` 行（子代理生命周期记录）
 
@@ -285,7 +291,9 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 10 | aggregate 返回值再扩展顶层 `tools` 明细分组（含 error 行时长；timing.toolTimeMs 既有口径不动） | 对齐原插件工具调用明细 | session-stats.cjs 头注释 |
 | 11 | 上下文弹层从「三行 key-value + 单色条」改为 deepseek `ContextMeter` 形态（头部一行读数 + 分段条 + 图例若干行，图例值域为占比）；桥新增窄投影 `getContextBreakdown()` | 用户要求对齐 deepseek 上下文窗口样式并保留字段占比。分段/图例需 breakdown，`getSessionSnapshot` 深拷贝整份会话不适合高频路径，故新增只投影三个字段的读取器 | statusbar.js `buildContextDetail` / `core/statusbar-bridge.js`；§4.4 |
 | 12 | `turns` 口径从「主会话完成请求数」改为「按 `turnId` 去重的用户输入轮数」；§4.3 行新增可选 `turnId` | 一轮的工具循环产生多次模型请求，按行计数把 1 轮数成 N 轮（实测 51 轮对应真实 2 个用户输入）。`turn_id` 列在现网库无空值；旧库缺列时 `_has_column` 探测降级为 `NULL as turn_id`，聚合端按独立一轮兜底 | `zusage.py` `_project_request_rows` / `session-stats.cjs` `countTurns`；§4.2/§4.3 |
-| 13 | 状态条用负 margin 下沉 `--zsb-sink` 占住宿主 dock 留白（`pb-4`+面板 `pb-1`）；弹层 `bottom` 同量抬回 | 状态条插在 `[data-v4-composer]` 之后，下方留着宿主 20px 底部内边距成为死区（实机红框）。下沉量由 `sinkIntoDockGap` 实测 `padding-bottom`（上限 24px 防误判），读不到时用 CSS 缺省 20px | statusbar.js `.zsb-bar` / `sinkIntoDockGap` |
-| 14 | 速度口径统一为 `completedAt − startedAt`，删除 `windowBasis` 的思考/Claude 分支与首字缩窗 | 宿主 `first_token_at` 来自流式事件时间戳，而该时间戳在写队列 flush 时才赋值（`model-streaming-event-queue.ts` 把 append 串行化），首个增量块的时间戳因此落到请求末尾。实测该列位于请求跨度的 97%–100% 处，1501 条请求中 632 条的首字窗不足 30ms。沿用首字窗时这 632 条算出 >1000 tok/s（中位首字窗 26ms，全窗中位 5310ms），趋势图出现 5927 tok/s 的虚假尖峰；改全窗后同一批数据中位 50、p95 141、峰值 223，无一条超 500。首字时间仍用于 TTFT 展示 | session-stats.cjs `rowWindowMs`；§4.2/§4.3 |
+| 13（已由 18 替代） | 状态条用负 margin 下沉 `--zsb-sink` 占住宿主 dock 留白（`pb-4`+面板 `pb-1`）；弹层 `bottom` 同量抬回 | 状态条插在 `[data-v4-composer]` 之后，下方留着宿主 20px 底部内边距成为死区（实机红框）。下沉量由 `sinkIntoDockGap` 实测 `padding-bottom`（上限 24px 防误判），读不到时用 CSS 缺省 20px | statusbar.js `.zsb-bar` / `sinkIntoDockGap` |
+| 14（已由 17 替代） | 速度口径统一为 `completedAt − startedAt`，删除 `windowBasis` 的思考/Claude 分支与首字缩窗 | 宿主 `first_token_at` 来自流式事件时间戳，而该时间戳在写队列 flush 时才赋值（`model-streaming-event-queue.ts` 把 append 串行化），首个增量块的时间戳因此落到请求末尾。实测该列位于请求跨度的 97%–100% 处，1501 条请求中 632 条的首字窗不足 30ms。沿用首字窗时这 632 条算出 >1000 tok/s（中位首字窗 26ms，全窗中位 5310ms），趋势图出现 5927 tok/s 的虚假尖峰；改全窗后同一批数据中位 50、p95 141、峰值 223，无一条超 500。首字时间仍用于 TTFT 展示 | session-stats.cjs `rowWindowMs`；§4.2/§4.3 |
 | 15 | 速度趋势从折线渲染改为单调三次贝塞尔曲线（Fritsch–Carlson 切线钳制） | 逐点折线在 64px 高度内呈锯齿状；Catmull-Rom 类插值会在峰谷过冲、画到峰值网格线之外。切线取相邻斜率的加权调和均值，段间保持单调，实测曲线 y 值域等于原始数据点值域 | statusbar.js `smoothPath` / `buildTrendSvg` |
 | 16 | 用量弹层三处调整：① 工具调用去掉合计行与每行错误计数（`tools.total`/`tools.errors`/`item.errors` 仍由聚合层产出，只是不渲染）；② 用量分组底部补「缓存占比」（会话口径 `cacheHitRate`）；③ 新增「今日用量」分组（`today` 块，全库口径）。 | 三个口径混在一个无分组边界的长列表里：合计行与每行尾部错误计数属噪音，而用户要看的是「本会话用量」与「今日用量」两块可比的读数；缓存命中率此前只在状态条 pill 上显示，弹层里看不到 | statusbar.js `buildUsageDetail` / `buildTodaySection`；§4.2 / §4.5 |
+| 17 | 速度优先相对耗时与有效 TTFT；排除无输出请求 | 修正前置等待拉低速度，同时保留队列 flush 保护；实时采样区分文字类型，空闲样本不刷新新鲜度；活动弹层 TPS 随条更新 | §4.1 / §4.3 |
+| 18 | 移除下沉负 margin；条底保留 8px 外边距，弹层距条 10px | 保留宿主 dock 留白，hover 区域不贴窗口边缘；替代偏差 13 | statusbar.js 样式 |

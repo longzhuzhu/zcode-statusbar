@@ -296,3 +296,18 @@ test('无数据时 TPS 行显 --、趋势区空态兜底', () => {
   assert.ok(text.includes('-- tok/s') || /输出速度（TPS）--/.test(text.replace(/\s+/g, '')), 'TPS 无数据显 --');
   assert.ok(text.includes('暂无数据'), '趋势区空态兜底');
 });
+
+
+test('活动弹层打开时 TPS 随实时样本刷新，并切回会话均值', () => {
+  const env = loadStatusbar();
+  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:session', { detail: sessionDetail() }));
+  const pop = mountActivityPop(env);
+  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:turn', {
+    detail: { tokPerSec: 222, estimated: true, updatedAt: Date.now() },
+  }));
+  assert.ok(fullText(pop).includes('222 tok/s'));
+  env.window.dispatchEvent(new env.window.CustomEvent('zcode-statusbar:turn', {
+    detail: { tokPerSec: 0, estimated: true, updatedAt: Date.now() - 4000 },
+  }));
+  assert.ok(fullText(pop).includes('118 tok/s'));
+});

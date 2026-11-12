@@ -199,6 +199,7 @@ class SubagentAndProjectionTests(unittest.TestCase):
             "kind": "model", "isSubagent": False, "model": "glm-5",
             "thinking": True, "status": "completed", "startedAt": 100,
             "firstTokenAt": 200, "completedAt": 900, "inputTokens": 100,
+            "durationMs": None, "ttftMs": None,
             "outputTokens": 50, "cacheReadTokens": 60, "cacheWriteTokens": 5,
             "subagentType": None, "task": None, "childSessionId": None,
         })

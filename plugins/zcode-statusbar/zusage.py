@@ -1265,8 +1265,7 @@ def _has_column(con, table, column):
 
 def _model_contract_row(r, parent_sid=None):
     """model_usage 行 → CONTRACT §4.3 请求行（纯函数）。
-    thinking = 思考请求标记（reasoning_tokens>0），仅供展示：消费方的速度窗口一律取
-    completed_at − started_at，不再按思考/Claude 分支选择窗口。
+    thinking = 思考请求标记（reasoning_tokens>0）；消费方保留首字前思考阶段。
     时间/token 取原值：缺失即 null，消费方按「非有限数值 = 缺失，逐行跳过」容错。
     sid = 投影来源会话 id（CONTRACT §4.3 扩展）：内核按窗口焦点会话过滤后聚合，防串数（R10）。
     parentSid = 行所属父会话（子代理行来自子会话，sid 永远不等于父会话）：内核按它分桶。
@@ -1287,6 +1286,8 @@ def _model_contract_row(r, parent_sid=None):
         "startedAt": _col(r, "started_at"),
         "firstTokenAt": _col(r, "first_token_at"),
         "completedAt": _col(r, "completed_at"),
+        "durationMs": _col(r, "duration_ms"),
+        "ttftMs": _col(r, "time_to_first_token_ms"),
         "inputTokens": _col(r, "input_tokens"),
         "outputTokens": _col(r, "output_tokens"),
         "cacheReadTokens": _col(r, "cache_read_input_tokens"),
@@ -1358,12 +1359,15 @@ def _subagent_contract_row(r, parent_sid, meta):
 
 
 def _model_row_cols(con):
-    """model 行投影列清单；turn_id 列存在才取（缺列时 SELECT 会整条失败）。
+    """model 行投影列清单；turn_id 与相对计时列存在才取（兼容旧库）。
     其余列是 CONTRACT §4.3 的既有字段，按现网 schema 恒在，不做逐个探测。"""
     turn = "m.turn_id" if _has_column(con, "model_usage", "turn_id") else "NULL as turn_id"
+    metrics = ", ".join(
+        "m." + name if _has_column(con, "model_usage", name) else "NULL as " + name
+        for name in ("duration_ms", "time_to_first_token_ms"))
     return f"""m.id, m.session_id, {turn}, m.query_source, m.model_id, m.status,
        m.started_at, m.first_token_at, m.completed_at, m.input_tokens, m.output_tokens,
-       m.reasoning_tokens, m.cache_read_input_tokens, m.cache_creation_input_tokens"""
+       m.reasoning_tokens, m.cache_read_input_tokens, m.cache_creation_input_tokens, {metrics}"""
 
 
 def _subagent_rows_of(con, sid, tools):

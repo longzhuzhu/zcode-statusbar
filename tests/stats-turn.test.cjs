@@ -56,7 +56,7 @@ test('无增量时速度归零而非冻结旧值', () => {
   for (ctx.t = 1100; ctx.t <= 3100; ctx.t += 100) sampler.tick();
   const last = published[published.length - 1];
   assert.equal(last.tokPerSec, 0); // 归零，不冻结 200
-  assert.equal(last.updatedAt, 3100);
+  assert.equal(last.updatedAt, 1000);
 });
 
 test('文本长度回落视为新一轮：窗口重置、速度归零', () => {
@@ -129,8 +129,7 @@ test('窗口滑动：速度按窗口内增量计算，旧增量不永久计入',
   ctx.t = 2200;
   ctx.len = 880;
   sampler.tick();
-  // 淘汰条件：samples[0].t < 2200-2000=200 → t=0 基线被淘汰，基线为 t=1000 len=400
-  // delta = 880-400 = 480 字符，dt = 1.2s → 480/1.2/2 = 200 tok/s
+  // 保留跨窗口左界的 t=0 基线：880 字符 / 2.2s / 2 = 200 tok/s
   assert.ok(Math.abs(published[published.length - 1].tokPerSec - 200) < 1e-9);
 });
 
@@ -149,4 +148,44 @@ test('reset：显式重置后基线重建', () => {
   ctx.len = 500;
   sampler.tick(); // delta 200/1s/2 = 100
   assert.equal(published[published.length - 1].tokPerSec, 100);
+});
+
+
+test('中英混排按文字类型估算；显式校准覆盖估算系数', () => {
+  const ctx = { t: 0, len: '' };
+  const { sampler } = make(ctx);
+  sampler.tick();
+  ctx.t = 1000;
+  ctx.len = '中文测试'.repeat(25);
+  assert.equal(sampler.tick().tokPerSec, 100);
+  ctx.t = 2000;
+  ctx.len += 'abcd'.repeat(100);
+  assert.equal(sampler.tick().tokPerSec, 100);
+  sampler.calibrateFromTurn({ outputTokens: 100, charCount: 400 });
+  ctx.t = 3000;
+  ctx.len += '中文测试'.repeat(100);
+  assert.equal(sampler.tick().tokPerSec, 100);
+});
+
+test('空闲样本会过期，不持续遮住完成态会话均值', () => {
+  const ctx = { t: 0, len: 0 };
+  const { sampler } = make(ctx);
+  sampler.tick();
+  ctx.t = 1000;
+  ctx.len = 200;
+  sampler.tick();
+  ctx.t = 5000;
+  const idle = sampler.tick();
+  assert.equal(idle.tokPerSec, 0);
+  assert.equal(idle.updatedAt, 1000);
+  assert.ok(ctx.t - idle.updatedAt >= 3000);
+});
+
+test('稀疏采样保留窗口基线，不把生成速度错误归零', () => {
+  const ctx = { t: 0, len: 0 };
+  const { sampler } = make(ctx);
+  sampler.tick();
+  ctx.t = 2100;
+  ctx.len = 420;
+  assert.equal(sampler.tick().tokPerSec, 100);
 });

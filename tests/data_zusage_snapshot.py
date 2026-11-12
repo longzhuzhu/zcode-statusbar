@@ -47,6 +47,8 @@ SNAPSHOT_TOP_KEYS = {"local_error", "session", "last_turn", "last", "today",
                      "not_local", "known_sids", "context_window", "context_auto",
                      "code", "ctx_exc", "tools", "recent"}
 
+MODEL_TIMING_KEYS = {"durationMs", "ttftMs"}
+
 CONTRACT_ROW_KEYS = {"id", "sid", "turnId", "parentSid", "kind", "isSubagent", "model",
                      "thinking", "status", "startedAt", "firstTokenAt", "completedAt",
                      "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
@@ -299,6 +301,30 @@ class SnapshotStructureTests(FixtureBase):
 class RequestRowProjectionTests(FixtureBase):
     """recent 请求行投影：范围、字段形状、缓存不重复、上限。"""
 
+    def test_relative_timing_metrics_reach_projection(self):
+        self.add_session(MAIN)
+        self.add_model("r-timing", MAIN, ttft=400)
+        con = sqlite3.connect(self.db)
+        con.row_factory = sqlite3.Row
+        con.execute("update model_usage set duration_ms=2000 where id='r-timing'")
+        projected = zusage._project_request_rows(con, [MAIN])
+        self.assertEqual(projected[0]["durationMs"], 2000)
+        self.assertEqual(projected[0]["ttftMs"], 400)
+        con.close()
+
+    def test_old_schema_without_relative_timing_still_projects(self):
+        self.add_session(MAIN)
+        self.add_model("r-old", MAIN)
+        con = sqlite3.connect(self.db)
+        con.row_factory = sqlite3.Row
+        con.execute("alter table model_usage drop column duration_ms")
+        con.execute("alter table model_usage drop column time_to_first_token_ms")
+        projected = zusage._project_request_rows(con, [MAIN])
+        self.assertEqual(len(projected), 1)
+        self.assertIsNone(projected[0]["durationMs"])
+        self.assertIsNone(projected[0]["ttftMs"])
+        con.close()
+
     def rows_of(self, snap):
         return snap["recent"]
 
@@ -308,7 +334,7 @@ class RequestRowProjectionTests(FixtureBase):
         rows = self.rows_of(snap)
         self.assertTrue(rows)
         for r in rows:
-            self.assertEqual(set(r.keys()), CONTRACT_ROW_KEYS)
+            self.assertEqual(set(r.keys()), CONTRACT_ROW_KEYS | (MODEL_TIMING_KEYS if r["kind"] == "model" else set()))
         by_id = {r["id"]: r for r in rows}
         # 主会话完成行在投影内
         self.assertIn("r1", by_id)
