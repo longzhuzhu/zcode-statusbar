@@ -79,7 +79,8 @@ function makeElement(tag) {
   };
 }
 
-function loadStatusbar() {
+function loadStatusbar(opts) {
+  const save = opts && opts.save != null ? opts.save : null;
   const anchor = makeElement('div');
   const host = makeElement('div');
   anchor.parentElement = host;
@@ -109,7 +110,7 @@ function loadStatusbar() {
   const window = {
     document,
     __ZCODE_STATUSBAR_BRIDGE__: { getPaneId: () => 'pane-test', getSessionSnapshot: () => null },
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: { getItem: () => save, setItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     listeners: {},
     addEventListener(type, fn) {
@@ -167,7 +168,7 @@ test('齿轮菜单：版本号位于最底部页脚，卸载项之后并带分�
 
   const last = menu.children[menu.children.length - 1];
   assert.equal(last.className, 'zsb-menu-ver', '菜单最后一项是版本号');
-  assert.match(last.textContent, /^v\d+\.\d+\.\d+$/, '版本号格式为 vX.Y.Z');
+  assert.match(last.children[1].textContent, /^v\d+\.\d+\.\d+$/, '版本号格式为 vX.Y.Z');
 
   const uninstallIdx = menu.children.findIndex(
     (n) => n.className === 'zsb-mi danger' && n.dataset.act === 'uninstall'
@@ -182,6 +183,18 @@ test('齿轮菜单：版本号位于最底部页脚，卸载项之后并带分�
   assert.ok(verIdx > uninstallIdx, '版本号在卸载项下方');
 });
 
+test('齿轮菜单：页脚左「版本」右号值，各占一端', () => {
+  const env = loadStatusbar();
+  const { menu } = mountMenu(env);
+
+  const ver = menu.children[menu.children.length - 1];
+  assert.equal(ver.className, 'zsb-menu-ver');
+  assert.equal(ver.children.length, 2, '页脚左右两格');
+  assert.equal(ver.children[0].textContent, '版本', '左侧是「版本」标签');
+  assert.match(ver.children[1].textContent, /^v\d+\.\d+\.\d+$/, '右侧是版本号');
+  assert.ok(SRC.includes('.zsb-menu-ver{display:flex;justify-content:space-between;'), '两端对齐');
+});
+
 test('齿轮菜单：动作区不被版本号隔断，分隔线恰好两条', () => {
   const env = loadStatusbar();
   const { menu } = mountMenu(env);
@@ -192,7 +205,56 @@ test('齿轮菜单：动作区不被版本号隔断，分隔线恰好两条', ()
   const acts = menu.children.filter((n) => n.dataset && n.dataset.act).map((n) => n.dataset.act);
   assert.deepEqual(
     acts,
-    ['toggle', 'toggle', 'toggle', 'toggle', 'toggle', 'refresh', 'diag', 'reset', 'update', 'uninstall'],
+    ['toggle', 'toggle', 'toggle', 'toggle', 'refresh', 'reset', 'update', 'uninstall'],
     '动作项顺序不变，版本号不占动作位'
   );
+});
+
+test('齿轮菜单：齿轮不在开关区，没有关闭入口', () => {
+  const env = loadStatusbar();
+  const { menu } = mountMenu(env);
+
+  const togglePills = menu.children
+    .filter((n) => n.dataset && n.dataset.act === 'toggle')
+    .map((n) => n.dataset.pill);
+  assert.deepEqual(togglePills, ['activity', 'usage', 'context', 'subagent'], '开关区只有四个可隐控件');
+});
+
+test('齿轮 pill：常驻可见，不受任何开关控制', () => {
+  const env = loadStatusbar();
+  const bar = env.host.children.find((n) => n.className === 'zsb-bar');
+  const gearPill = bar.children.find((n) => n.dataset && n.dataset.zsbPill === 'gear');
+  assert.ok(gearPill, 'gear pill 存在');
+  assert.notEqual(gearPill.style.display, 'none', 'gear pill 未被隐藏');
+});
+
+test('齿轮 pill：旧版本遗留的 gear:false 失效，升级后自动常驻', () => {
+  const env = loadStatusbar({ save: JSON.stringify({ activity: false, gear: false }) });
+  const bar = env.host.children.find((n) => n.className === 'zsb-bar');
+  const gearPill = bar.children.find((n) => n.dataset && n.dataset.zsbPill === 'gear');
+  const actPill = bar.children.find((n) => n.dataset && n.dataset.zsbPill === 'activity');
+  assert.notEqual(gearPill.style.display, 'none', '白名单外的 gear 键被忽略，齿轮常驻');
+  assert.equal(actPill.style.display, 'none', '白名单内的旧开关仍然生效');
+});
+
+test('齿轮菜单：勾选用复选框图标，勾选态蓝色实心，两态都绘制', () => {
+  const env = loadStatusbar();
+  const { menu } = mountMenu(env);
+
+  const toggles = menu.children.filter((n) => n.dataset && n.dataset.act === 'toggle');
+  for (const mi of toggles) {
+    const tick = mi.children[mi.children.length - 1];
+    assert.equal(tick.className.indexOf('tick'), 0, '开关项右侧是勾选列');
+    assert.match(tick.innerHTML, /<rect /, '两态都绘制方框');
+    assert.equal(tick.textContent, '', '不再用字符 ✓，改用图标');
+  }
+
+  const onTicks = toggles.filter((n) => n.children[n.children.length - 1].className.includes('on'));
+  assert.equal(onTicks.length, toggles.length, '默认四项全勾选');
+  const onInner = onTicks[0].children[onTicks[0].children.length - 1].innerHTML;
+  assert.match(onInner, /fill="currentColor"/, '勾选态是实心方框');
+  assert.match(onInner, /stroke-width="1.6"/, '实心方框内是反白对勾');
+
+  assert.match(SRC, /\.zsb-mi \.tick\{[^}]*color:var\(--zsb-accent\)/, '勾选列取强调色（蓝）');
+  assert.match(SRC, /--zsb-accent', dark \? '#4d93f8' : '#3b82f6'/, '强调色为官方蓝，深色提亮');
 });

@@ -89,13 +89,15 @@ UNKNOWN = "sess_unknown_9"
 CALL_SUB = "call_sub_1"
 
 
-def agent_part_data(desc, agent_id, *, call=None, subagent_type=None):
+def agent_part_data(desc, agent_id, *, call=None, subagent_type=None, prompt="p" * 60):
     """Agent 工具 part 的 data 形状（与宿主写库格式同构：紧凑 JSON + 回执 agentId 行）。
-    callID 是运行中条目与 tool_usage.tool_call_id 的 join 键；不给则不写该字段。"""
+    callID 是运行中条目与 tool_usage.tool_call_id 的 join 键；不给则不写该字段。
+    agent_id=None 表示运行中、回执还没写出（宿主只在子代理收工时写 output）。
+    prompt 用于测标题前缀匹配：子会话 title = prompt 前 57 字符 + "..."。"""
     o = {"type": "tool",
          "tool": "Agent",
-         "state": {"input": {"description": desc, "prompt": "p" * 60},
-                   "output": "done\nagentId: " + agent_id}}
+         "state": {"input": {"description": desc, "prompt": prompt},
+                   "output": "" if agent_id is None else "done\nagentId: " + agent_id}}
     if call:
         o["callID"] = call
     if subagent_type:
@@ -396,11 +398,12 @@ class RequestRowProjectionTests(FixtureBase):
         self.assertEqual(len(tools), 1)
 
     def test_running_subagent_row_from_tool_usage(self):
-        """运行中子代理：tool_usage 的 running Agent 行 + part 的 callID 关联出任务名与类型。"""
+        """运行中子代理：tool_usage 的 running Agent 行 + part 的 callID 关联出任务名与类型。
+        回执未写出（运行期的真实形状）：子会话尚无证据，childSessionId 为 null。"""
         self.build_standard_fixture()
         self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
                       call="call_live_1")
-        self.add_part(MAIN, agent_part_data("恢复工具调用明细分组", "a2",
+        self.add_part(MAIN, agent_part_data("恢复工具调用明细分组", None,
                                            call="call_live_1",
                                            subagent_type="pstack-zcode:poteto-agent"),
                       updated=T0 + 20001)
@@ -412,7 +415,7 @@ class RequestRowProjectionTests(FixtureBase):
         self.assertEqual(live["parentSid"], MAIN)
         self.assertEqual(live["task"], "恢复工具调用明细分组")
         self.assertEqual(live["subagentType"], "pstack-zcode:poteto-agent")
-        self.assertIsNone(live["childSessionId"])   # 子会话还没建
+        self.assertIsNone(live["childSessionId"])   # 无回执且无同名子会话
         self.assertIsNone(live["completedAt"])
         self.assertEqual(live["startedAt"], T0 + 20000)
 
@@ -514,13 +517,13 @@ class SubagentListTests(FixtureBase):
         self.build_standard_fixture()
         self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000, completed=None,
                       call="call_live_1")
-        self.add_part(MAIN, agent_part_data("调研留白来源", "a2", call="call_live_1",
+        self.add_part(MAIN, agent_part_data("调研留白来源", None, call="call_live_1",
                                            subagent_type="Explore"), updated=T0 + 20001)
         zusage._TASK_CACHE.clear()
         it = self.item_of(status="running", call="call_live_1")
         self.assertEqual(it["type"], "Explore")
         self.assertEqual(it["task"], "调研留白来源")
-        self.assertIsNone(it["childSessionId"])
+        self.assertIsNone(it["childSessionId"])   # 无回执、无同名子会话 → 不猜
         self.assertIsNone(it["endedAt"])
         self.assertEqual(it["requests"], 0)
         self.assertEqual(it["total"], 0)
@@ -604,6 +607,38 @@ class SubagentListTests(FixtureBase):
         self.assertFalse(any(r["kind"] == "subagent" for r in snap["recent"]))
         self.assertEqual(
             [i["childSessionId"] for i in self.session_snap(MAIN)["sub"]["list"]], [SUB])
+
+    def test_running_item_keeps_child_session_from_title_match(self):
+        """运行中的子代理也要带上子会话 id：宿主在请求完成前就建好子会话并给它 model 行，
+        回执还没写出时按 prompt 前缀唯一匹配就能硬认领。丢掉这个关联会让同一次派发在
+        面板里出现两条（运行中一条、孤儿一条），孤儿没有任务名只剩尾号。"""
+        self.add_session(MAIN)
+        # 宿主给子会话的标题 = prompt 前 57 字符 + "..."；回执还没写出，只能靠它认领
+        self.add_session(SUB, parent=MAIN, title="p" * 57 + "...")
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000,
+                      completed=None, call="call_live_1")
+        self.add_part(MAIN, agent_part_data("调研留白来源", None, call="call_live_1",
+                                            subagent_type="Explore"), updated=T0 + 20001)
+        self.add_model("m_run", SUB, source="subagent", status="completed",
+                       started=T0 + 20000, first=T0 + 20100, completed=T0 + 21000,
+                       inp=100, out=300)
+        zusage._TASK_CACHE.clear()
+        items = self.session_snap(MAIN)["sub"]["list"]
+        self.assertEqual(len(items), 1, f"同一次派发只该有一条条目: {items}")
+        self.assertEqual(items[0]["status"], "running")
+        self.assertEqual(items[0]["childSessionId"], SUB)
+        self.assertEqual(items[0]["task"], "调研留白来源")
+
+    def test_running_item_without_child_session_stays_orphan_free(self):
+        """运行中且子会话还没建（回执与标题都无证据）：仍只出一条，childSessionId 为 null。"""
+        self.add_session(MAIN)
+        self.add_tool("trun", MAIN, "Agent", "running", started=T0 + 20000,
+                      completed=None, call="call_live_2")
+        zusage._TASK_CACHE.clear()
+        items = self.session_snap(MAIN)["sub"]["list"]
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(items[0]["childSessionId"])
+        self.assertEqual(items[0]["status"], "running")
 
 
 class ContextFallbackTests(FixtureBase):

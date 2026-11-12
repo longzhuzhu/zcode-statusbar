@@ -138,6 +138,88 @@ test('无活跃子代理时 activeTokPerSec 为 null', () => {
   assert.equal(agg.subagent.activeTokPerSec, null);
 });
 
+test('运行中子代理的速度：由同子会话近期已完成段回推（宿主运行期不写 running 行）', () => {
+  // 实库口径：子代理运行期间，model_usage 里不断落库的是「已完成」的行，整轮请求跑完才
+  // 出现 running 状态的行——这里 0 条 running。若只统计 running 行，运行期永远没有速度。
+  const now = 100_000;
+  const rows = [
+    // 运行中的 Agent 投影行：存在性证据，自身零 token
+    row({
+      id: 'call_live',
+      kind: 'subagent',
+      isSubagent: true,
+      sid: 'sess_main',
+      childSessionId: 'sess_sub_a',
+      status: 'running',
+      startedAt: 10_000,
+      firstTokenAt: null,
+      completedAt: null,
+      inputTokens: 0,
+      outputTokens: 0,
+    }),
+    // 该子会话近期已完成的两段：各 2s 生成窗、各 400 输出
+    row({ id: 'm1', kind: 'model', isSubagent: true, sid: 'sess_sub_a', status: 'completed',
+      startedAt: 40_000, firstTokenAt: 40_100, completedAt: 42_000,
+      inputTokens: 100, outputTokens: 400 }),
+    row({ id: 'm2', kind: 'model', isSubagent: true, sid: 'sess_sub_a', status: 'completed',
+      startedAt: 90_000, firstTokenAt: 90_100, completedAt: 92_000,
+      inputTokens: 100, outputTokens: 400 }),
+  ];
+  const agg = aggregate(rows, now);
+  assert.equal(agg.subagent.activeCount, 1);
+  assert.ok(agg.subagent.activeTokPerSec != null, '运行中应有速度读数');
+  assert.ok(Math.abs(agg.subagent.activeTokPerSec - 800 / 4) < 1e-9, 'Σ输出 ÷ Σ生成窗');
+});
+
+test('运行中子代理速度：过期段落不进分子分母（不用几小时前的旧读数冒充实时）', () => {
+  const now = 10_000_000;
+  const rows = [
+    row({ id: 'call_live', kind: 'subagent', isSubagent: true, sid: 'sess_main',
+      childSessionId: 'sess_sub_a', status: 'running', startedAt: 9_999_000,
+      firstTokenAt: null, completedAt: null, inputTokens: 0, outputTokens: 0 }),
+    // 一小时前的段：超出活跃窗口，不该被当成"当下速度"
+    row({ id: 'old', kind: 'model', isSubagent: true, sid: 'sess_sub_a', status: 'completed',
+      startedAt: 1_000, firstTokenAt: 1_100, completedAt: 3_000,
+      inputTokens: 100, outputTokens: 400 }),
+  ];
+  const agg = aggregate(rows, now);
+  assert.equal(agg.subagent.activeCount, 1, '条目仍是运行中');
+  assert.equal(agg.subagent.activeTokPerSec, null, '无近期段落 → 无速度，不拿旧数据顶');
+});
+
+test('无运行中子代理时，已完成段不产生活跃速度', () => {
+  const rows = [
+    row({ id: 'done', kind: 'subagent', isSubagent: true, sid: 'sess_main',
+      childSessionId: 'sess_sub_a', status: 'completed', startedAt: 1_000,
+      completedAt: 3_000, inputTokens: 0, outputTokens: 0 }),
+    row({ id: 'm1', kind: 'model', isSubagent: true, sid: 'sess_sub_a', status: 'completed',
+      startedAt: 1_000, firstTokenAt: 1_100, completedAt: 3_000,
+      inputTokens: 100, outputTokens: 400 }),
+  ];
+  const agg = aggregate(rows, 5_000);
+  assert.equal(agg.subagent.activeCount, 0);
+  assert.equal(agg.subagent.activeTokPerSec, null);
+});
+
+test('运行中条目与其子会话 model 行合并成一条（不该出现无任务名的孤儿行）', () => {
+  const rows = [
+    row({ id: 'call_live', kind: 'subagent', isSubagent: true, sid: 'sess_main',
+      childSessionId: 'sess_sub_a', subagentType: 'Explore', task: '调研布局',
+      status: 'running', startedAt: 10_000, firstTokenAt: null, completedAt: null,
+      inputTokens: 0, outputTokens: 0 }),
+    row({ id: 'm1', kind: 'model', isSubagent: true, sid: 'sess_sub_a', status: 'completed',
+      startedAt: 11_000, firstTokenAt: 11_100, completedAt: 13_000,
+      inputTokens: 100, outputTokens: 400 }),
+  ];
+  const agg = aggregate(rows, 20_000);
+  assert.equal(agg.subagent.list.length, 1, '同一次派发只该有一条');
+  const it = agg.subagent.list[0];
+  assert.equal(it.status, 'running');
+  assert.equal(it.task, '调研布局');
+  assert.equal(it.type, 'Explore');
+  assert.ok(it.outputTokens > 0, '运行中也要带出已完成的 token');
+});
+
 test('speedTrend：按完成时间升序取最近 10 轮（R6）', () => {
   const rows = [];
   for (let i = 0; i < 15; i++) {

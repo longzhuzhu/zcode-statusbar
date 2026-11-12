@@ -71,7 +71,7 @@ function makeElement(tag) {
       return true;
     },
     querySelector(sel) {
-      // 只支持类选择器：趋势图盒按 `.zsb-trend` 找，其余（[data-act="diag"] 等）返回 null。
+      // 只支持类选择器：趋势图盒按 `.zsb-trend` 找，其余选择器返回 null。
       // 与浏览器一致，从自身子树开始匹配，不查后代之外。
       if (!sel || sel.charAt(0) !== '.') return null;
       const want = sel.slice(1);

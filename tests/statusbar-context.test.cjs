@@ -209,7 +209,7 @@ test('头部一行同时给出占比与 used/total（对齐 deepseek header）',
   assert.equal(pop.hidden, false);
 });
 
-test('breakdown 按三桶切分：分段条 3 段 + 图例 3 行，值域是占比而非 token', () => {
+test('breakdown 按三桶切分：分段条 3 段 + 图例 3 行，图例值是按份额分配的 token', () => {
   const env = loadStatusbar({
     used: '11400',
     max: '262000',
@@ -232,11 +232,13 @@ test('breakdown 按三桶切分：分段条 3 段 + 图例 3 行，值域是占�
   assert.ok(text.includes('系统提示词'), '系统提示词行');
   assert.ok(text.includes('工具定义'), '工具定义行');
   assert.ok(text.includes('对话消息'), '对话消息行');
-  // 桶内份额：system (1400+200)=1600、tools (6000+1100)=7100、messages 3100；总 11800
-  assert.ok(text.includes('14%'), 'system 1600/11800 ≈ 13.6% → 14%');
-  assert.ok(text.includes('60%'), 'tools 7100/11800 ≈ 60.2% → 60%');
-  assert.ok(text.includes('26%'), 'messages 3100/11800 ≈ 26.3% → 26%');
+  // 分项 token = 头部已用 11400 × 桶内份额，三行之和必须回到头部总量
+  // system 1600/11800 → 0.1356 × 11400 ≈ 1546；tools 7100/11800 ≈ 0.6017 → 6860；messages 3100/11800 ≈ 0.2627 → 2995
+  assert.ok(text.includes('~1.5K'), 'system 份额 13.6% → ~1.5K');
+  assert.ok(text.includes('~6.9K'), 'tools 份额 60.2% → ~6.9K');
+  assert.ok(text.includes('~3.0K'), 'messages 份额 26.3% → ~3.0K');
   assert.ok(!text.includes(' chars'), '不暴露原始 chars');
+  assert.ok(!/\b14%\b/.test(text), '图例不再显示占比');
   // 分段宽度 = 总水位 4.35% × 份额；三段之和回到总水位
   const widths = segs.map((s) => parseFloat(s.style.width));
   const sum = widths.reduce((a, b) => a + b, 0);
@@ -254,7 +256,7 @@ test('未知 source 不计入：比例在已知来源内归一，不猜归属', 
   });
   const pop = openContextPop(env);
   const text = fullText(pop);
-  assert.ok(text.includes('100%'), '唯一已知来源占满图例份额');
+  assert.ok(text.includes('~1.0K'), '唯一已知来源占满全部已用水位');
   assert.equal(descendants(pop).filter((n) => n.className === 'zsb-ctxrow').length, 1, '未知来源不新增行');
 });
 
@@ -278,7 +280,7 @@ test('桥返回 null（store 未就绪）时同样走单色降级', () => {
   assert.equal(nodes.filter((n) => n.className === 'zsb-ctxbar-fill').length, 1);
 });
 
-test('占比格式化：≥10% 取整、小份额保留一位小数', () => {
+test('小份额来源不被抹成 0：份额极小仍给出可读 token 数', () => {
   const env = loadStatusbar({
     used: '1000',
     max: '10000',
@@ -289,8 +291,8 @@ test('占比格式化：≥10% 取整、小份额保留一位小数', () => {
   });
   const pop = openContextPop(env);
   const text = fullText(pop);
-  assert.ok(text.includes('99%') || text.includes('100%'), '大份额取整');
-  assert.ok(text.includes('0.4%'), '0.4% 不被抹成 0%');
+  assert.ok(text.includes('~996'), 'messages 份额 99.6% → ~996');
+  assert.ok(text.includes('~4'), 'system 份额 0.4% → ~4（不抹成 0）');
 });
 
 test('优先走桥的窄投影 getContextBreakdown，不触发整份快照深拷贝', () => {

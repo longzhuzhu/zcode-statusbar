@@ -92,6 +92,15 @@
   // 显示开关持久化键（localStorage，pane 无关；卸载保留）
   var LS_PIILLS = 'zcode-statusbar.pills';
 
+  // 可开关的 pill（顺序即菜单顺序）。齿轮不在其列：它是菜单唯一入口，关掉即无路可回。
+  var TOGGLE_PILLS = ['activity', 'usage', 'context', 'subagent'];
+  var PILL_LABEL = {
+    activity: 'pillActivity',
+    usage: 'pillUsage',
+    context: 'pillContext',
+    subagent: 'pillSubagent',
+  };
+
   // 文案（默认中文）。宿主语言覆盖点：内核注入本文件前设置
   // window.__ZCODE_STATUSBAR_I18N__ = { <key>: '译文', ... } 即可整键覆盖。
   var I18N = {
@@ -151,13 +160,11 @@
     pillUsage: '用量',
     pillContext: '上下文',
     pillSubagent: '子代理',
-    pillGear: '齿轮',
     menuRefresh: '立即刷新',
-    menuDiag: '复制诊断',
     menuReset: '重置会话统计',
     menuUpdate: '检查更新',
     menuUninstall: '卸载状态条',
-    copied: '已复制',
+    menuVersion: '版本',
   };
   if (W.__ZCODE_STATUSBAR_I18N__ && typeof W.__ZCODE_STATUSBAR_I18N__ === 'object') {
     for (var k in W.__ZCODE_STATUSBAR_I18N__) {
@@ -179,20 +186,21 @@
     turn: null, // { tokPerSec, estimated, updatedAt }
     session: null, // session-stats.cjs aggregate() 输出
     today: null, // 内核帧的 today 块（全库今日 completed 行）；与 session 口径不同，单独存
-    sessionAt: 0, // 最近一次 session 数据到达时间（诊断用）
     context: null, // { used, size } 上下文占用（读宿主隐藏锚点，诊断用）
     breakdown: null, // [{ source, chars }] 上下文来源明细（弹层打开时读一次，见 readContextBreakdown）
     subSeen: false, // 本会话是否出现过子代理：出现过就一直显示 pill，换会话重置（防串数）
     sessionOwner: null, // 当前会话 id（来自内核 detail.mine）：判定"换会话"的唯一依据
     lastError: null,
-    visible: { activity: true, usage: true, context: true, subagent: true, gear: true },
+    // 齿轮不在开关表内：它是菜单的唯一入口，关掉就再也打不开，故常驻不可隐。
+    // 旧版本写入的 gear 键读不到即失效（白名单外的键一律忽略），升级后自动恢复常驻。
+    visible: { activity: true, usage: true, context: true, subagent: true },
   };
 
   // 显示开关持久化
   try {
     var saved = JSON.parse(W.localStorage.getItem(LS_PIILLS) || 'null');
     if (saved && typeof saved === 'object') {
-      ['activity', 'usage', 'context', 'subagent', 'gear'].forEach(function (n) {
+      TOGGLE_PILLS.forEach(function (n) {
         if (typeof saved[n] === 'boolean') state.visible[n] = saved[n];
       });
     }
@@ -244,13 +252,6 @@
   // 有限数值读取：非有限值一律视为缺失（null），与 session-stats.cjs 的 num() 同口径
   function finNum(v) {
     return typeof v === 'number' && isFinite(v) ? v : null;
-  }
-
-  // 来源占比：≥10% 取整（避免长条上的抖动），小份额保留一位小数（0.4% 不吃成 0%）
-  function fmtShare(rate) {
-    if (typeof rate !== 'number' || !isFinite(rate)) return '--';
-    var p = rate * 100;
-    return (p >= 10 ? String(Math.round(p)) : (Math.round(p * 10) / 10).toFixed(1)) + '%';
   }
 
   function fmtMsNum(ms) {
@@ -386,12 +387,16 @@
     '.zsb-trend .zsb-tnow{font-weight:500;}',
     '.zsb-menu{display:flex;flex-direction:column;min-width:180px;}',
     '.zsb-menu-title{font-weight:700;margin-bottom:4px;}',
+    // 页脚左右两端：左「版本」右号值，与动作项的左对齐边线共列。
+    '.zsb-menu-ver{display:flex;justify-content:space-between;gap:12px;opacity:.55;line-height:20px;padding:0 4px;}',
     '.zsb-mi{display:flex;justify-content:space-between;align-items:center;gap:12px;border:0;background:transparent;',
     'color:inherit;font:inherit;line-height:26px;padding:0 4px;border-radius:6px;cursor:pointer;text-align:left;white-space:nowrap;}',
     '.zsb-mi:hover{background:color-mix(in srgb,currentColor 10%,transparent);}',
-    '.zsb-mi .tick{opacity:.9;}',
+    // 勾选列：定宽，符号与文字同尺寸；勾选态取官方蓝（深色主题提亮），未勾态只有淡描边。
+    '.zsb-mi .tick{display:inline-flex;width:14px;height:14px;flex:none;color:var(--zsb-accent);}',
+    '.zsb-mi .tick svg{width:14px;height:14px;display:block;}',
+    '.zsb-mi .tick:not(.on){color:currentColor;}',
     '.zsb-mi.danger:hover{background:color-mix(in srgb,#e5484d 14%,transparent);}',
-    '.zsb-menu-ver{opacity:.55;line-height:20px;padding:0 4px;text-align:right;}',
     '.zsb-hr{border:0;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent);margin:6px 0;}',
   ].join('');
 
@@ -421,12 +426,14 @@
     var mono = hostVar('--font-mono');
     var sans = hostVar('--font-sans');
     var smSize = hostVar('--text-ui-sm');
+    var xsSize = hostVar('--text-ui-xs');
     var subtle = hostVar('--color-foreground-subtle');
     var primary = hostVar('--color-foreground');
     var bg = hostVar('--color-background');
     if (mono) root.style.setProperty('--zcode-font-mono', mono);
     if (sans) root.style.setProperty('--zsb-font-ui', sans);
     if (smSize) root.style.setProperty('--zcode-font-text-sm-size', smSize);
+    if (xsSize) root.style.setProperty('--zcode-font-text-xs-size', xsSize);
     if (subtle) root.style.setProperty('--zcode-color-text-secondary', subtle);
     if (primary) root.style.setProperty('--zcode-color-text-primary', primary);
     if (bg) root.style.setProperty('--zsb-pop-bg', bg);
@@ -436,6 +443,8 @@
     root.style.setProperty('--zsb-primary', dark ? '#e6e8eb' : '#232629');
     root.style.setProperty('--zsb-pop-bg-fallback', dark ? '#1e1f22' : '#ffffff');
     root.style.setProperty('--zsb-pop-border', dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.12)');
+    // 强调色（菜单勾选）：官方蓝 #3b82f6，深色下提亮到 #4d93f8 保证暗底可辨
+    root.style.setProperty('--zsb-accent', dark ? '#4d93f8' : '#3b82f6');
     // 上下文来源配色：系统提示词跟主题灰走（深色下提亮），工具/消息用固定紫蓝（deepseek 同款）
     root.style.setProperty('--zsb-ctx-system', dark ? 'rgb(173,178,184)' : 'rgb(129,133,140)');
     root.style.setProperty('--zsb-ctx-tools', '#a78bfa');
@@ -645,7 +654,7 @@
       return;
     }
     var pct = Math.min(1, Math.max(0, c.used / c.size));
-    var shares = contextShares();
+    var shares = contextShares(c.used);
 
     var head = el('div', 'zsb-ctx-head');
     head.appendChild(el('span', 'zsb-ctx-headline', I18N.ctxHeadline));
@@ -679,7 +688,7 @@
         sw.style.background = s.color;
         r.appendChild(sw);
         r.appendChild(el('span', 'k', s.label));
-        r.appendChild(el('span', 'v', s.sharePct));
+        r.appendChild(el('span', 'v', '~' + fmtTok(s.tokens)));
         list.appendChild(r);
       });
       pop.appendChild(list);
@@ -688,7 +697,10 @@
 
   // 来源分桶：宿主七个 source 归三桶。未知 source 不计入——枚举扩展时比例在已知来源
   // 内归一，不猜归属（宁可比例偏差，不可错标来源）。
-  function contextShares() {
+  // 分项 token 由「已知总量 × 桶内份额」分配，不是 chars 独立折算：宿主 breakdown 只给
+  // chars（surface 组成的估算），与水位数 used（提供方精确值）不同源，独立折算会让三行
+  // 之和与头部对不上。按份额分配则三行恒等于头部，也与分段条的几何一一对应。
+  function contextShares(usedTokens) {
     var list = state.breakdown;
     if (!list || !list.length) return null;
     var totals = {};
@@ -707,12 +719,13 @@
       var bucket = CTX_BUCKETS[j];
       var n = totals[bucket.key] || 0;
       if (n <= 0) continue;
+      var share = n / sum;
       out.push({
         key: bucket.key,
         label: I18N[bucket.label],
         color: bucket.color,
-        share: n / sum,
-        sharePct: fmtShare(n / sum),
+        share: share,
+        tokens: Math.round(usedTokens * share),
       });
     }
     return out.length ? out : null;
@@ -1005,11 +1018,13 @@
     if (it.task) pop.appendChild(row(I18N.subTask, it.task));
     pop.appendChild(row(I18N.subStarted, fmtClock(it.startedAt)));
     pop.appendChild(row(I18N.subDuration, fmtDur(it.durationMs)));
-    // 运行中的 token 尚未落库，显示 0 会读成"没产出"。改显占位，不伪造读数。
+    // 运行中：token 与请求数来自「已跑完的段」（宿主运行期不写 running 行），有就读出来，
+    // 读不到显占位。速度优先用近期段实时值，缺了再退回已完成段均值。
     if (it.status === 'running') {
-      pop.appendChild(row(I18N.subRequests, '--'));
-      pop.appendChild(row(I18N.subOutput, '--'));
-      pop.appendChild(row(I18N.subTps, '--'));
+      pop.appendChild(row(I18N.subRequests, it.requests ? String(it.requests) : '--'));
+      pop.appendChild(row(I18N.subInput, it.inputTokens ? fmtTok(it.inputTokens) : '--'));
+      pop.appendChild(row(I18N.subOutput, it.outputTokens ? fmtTok(it.outputTokens) : '--'));
+      pop.appendChild(row(I18N.subTps, it.tpsLive != null ? Math.round(it.tpsLive) + ' tok/s' : '--'));
       return;
     }
     pop.appendChild(row(I18N.subRequests, String(it.requests || 0)));
@@ -1043,28 +1058,39 @@
 
   // ================= 齿轮短菜单（R7，全部短句） =================
 
+  // 勾选图标：常勾态用实心方框 + 反白对勾（视觉重量与文字相当），未勾态只留描边方框。
+  // 两态都绘制，右侧因此有一列稳定宽度的对齐刻度，不会像"有勾才出字符"那样左右跳。
+  var TICK_CHECKED =
+    '<svg viewBox="0 0 14 14" aria-hidden="true">' +
+    '<rect x="1.5" y="1.5" width="11" height="11" rx="2.5" fill="currentColor"/>' +
+    '<path d="M4.4 7.1 6.2 8.9 9.6 5.3" fill="none" stroke="var(--zsb-pop-bg,var(--zsb-pop-bg-fallback,#fff))" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var TICK_UNCHECKED =
+    '<svg viewBox="0 0 14 14" aria-hidden="true">' +
+    '<rect x="1.5" y="1.5" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.4" opacity="0.55"/></svg>';
+
+  function tickIcon(on) {
+    var t = el('span', 'tick' + (on ? ' on' : ''));
+    t.innerHTML = on ? TICK_CHECKED : TICK_UNCHECKED;
+    return t;
+  }
+
   function buildMenu(pop) {
     var menu = el('div', 'zsb-menu');
     menu.appendChild(el('div', 'zsb-menu-title', I18N.menuShow));
-    [
-      ['activity', I18N.pillActivity],
-      ['usage', I18N.pillUsage],
-      ['context', I18N.pillContext],
-      ['subagent', I18N.pillSubagent],
-      ['gear', I18N.pillGear],
-    ].forEach(function (pair) {
+    TOGGLE_PILLS.forEach(function (name) {
       var mi = el('button', 'zsb-mi');
       mi.type = 'button';
       mi.dataset.act = 'toggle';
-      mi.dataset.pill = pair[0];
-      mi.appendChild(el('span', null, pair[1]));
-      mi.appendChild(el('span', 'tick', state.visible[pair[0]] ? '✓' : ''));
+      mi.dataset.pill = name;
+      mi.appendChild(el('span', null, I18N[PILL_LABEL[name]]));
+      mi.appendChild(tickIcon(state.visible[name]));
       menu.appendChild(mi);
     });
     menu.appendChild(el('hr', 'zsb-hr'));
     [
       ['refresh', I18N.menuRefresh],
-      ['diag', I18N.menuDiag],
       ['reset', I18N.menuReset],
       ['update', I18N.menuUpdate],
     ].forEach(function (pair) {
@@ -1080,7 +1106,10 @@
     un.appendChild(el('span', null, I18N.menuUninstall));
     menu.appendChild(un);
     menu.appendChild(el('hr', 'zsb-hr'));
-    menu.appendChild(el('div', 'zsb-menu-ver', 'v' + VERSION));
+    var ver = el('div', 'zsb-menu-ver');
+    ver.appendChild(el('span', null, I18N.menuVersion));
+    ver.appendChild(el('span', null, 'v' + VERSION));
+    menu.appendChild(ver);
     pop.appendChild(menu);
   }
 
@@ -1109,20 +1138,6 @@
       emit(EV.REFRESH, { paneId: state.paneId });
       render(); // 即时反馈：数据由内核重查后经 session 事件到达（CONTRACT.md §7.6）
       closePop();
-    } else if (act === 'diag') {
-      copyText(buildDiagText());
-      // 短反馈：菜单项文字短暂替换为"已复制"
-      if (ui && !ui.pop.hidden) {
-        var mi = ui.pop.querySelector('[data-act="diag"]');
-        if (mi) {
-          var span = mi.querySelector('span');
-          var old = span.textContent;
-          span.textContent = I18N.copied;
-          setTimeout(function () {
-            span.textContent = old;
-          }, 1200);
-        }
-      }
     } else if (act === 'reset') {
       emit(EV.RESET, { paneId: state.paneId });
       state.session = null;
@@ -1137,64 +1152,16 @@
     }
   }
 
-  function copyText(text) {
-    var done = false;
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        navigator.clipboard.writeText(text);
-        done = true;
-      }
-    } catch (e) {
-      done = false;
-    }
-    if (!done) {
-      // 降级：隐藏 textarea + execCommand
-      try {
-        var ta = D.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        D.body.appendChild(ta);
-        ta.select();
-        D.execCommand('copy');
-        D.body.removeChild(ta);
-      } catch (e) {
-        /* 复制失败静默（诊断文本也可从日志取） */
-      }
-    }
-  }
-
-  function buildDiagText() {
-    var bridge = W.__ZCODE_STATUSBAR_BRIDGE__;
-    var lines = [
-      'ZCode 状态条诊断',
-      '版本: ' + VERSION,
-      '时间: ' + new Date().toISOString(),
-      '挂载: ' + (state.mounted ? '已挂载' : '未挂载' + (state.lastError ? '（' + state.lastError + '）' : '')),
-      '身份: 桥=' + (bridge ? '有' : '无') + ' paneId=' + (state.paneId || 'null'),
-      '模块: turn-stats=' + (W.__ZCODE_STATUSBAR_TURN_API__ ? '有' : '无') +
-        ' ramp=' + (rampApi() ? '有' : '无（降级中性灰）'),
-      '上下文: ' + (state.context
-        ? fmtTok(state.context.used) + ' / ' + fmtTok(state.context.size) +
-          '（' + fmtPct(state.context.used / state.context.size) + '）'
-        : '未读到宿主锚点'),
-      '最近会话数据: ' + (state.sessionAt ? new Date(state.sessionAt).toISOString() : '无'),
-      '控件开关: ' + JSON.stringify(state.visible),
-      '最近错误: ' + (state.lastError || '无'),
-      'UA: ' + (navigator.userAgent || '--'),
-    ];
-    return lines.join('\n');
-  }
-
   // ================= 渲染 =================
 
   // 显示 = 用户开关 AND 该 pill 有理由显示。两类"无理由"整只不占位：
   // - 上下文 pill：宿主锚点缺席或占用为 0（R4/R10）
   // - 子代理 pill：本会话还没出现过任何子代理（subSeen 为会话内粘滞标志，
   //   出现过一次后不再回退，避免子代理连续派发时 pill 闪进闪出）
+  // 齿轮不经此函数：它常驻，只受降级阶梯影响（任何档位都不隐）。
   function renderVisibility() {
     if (!ui) return;
-    ['activity', 'usage', 'context', 'subagent', 'gear'].forEach(function (n) {
+    TOGGLE_PILLS.forEach(function (n) {
       var hasReason = n !== 'context' || !!state.context;
       if (n === 'subagent') hasReason = state.subSeen;
       var on = state.visible[n] && hasReason;
@@ -1749,7 +1716,6 @@
       if (day && typeof day === 'object' && !Array.isArray(day)) state.today = day;
       if (d) {
         state.session = d;
-        state.sessionAt = Date.now();
         render();
         refreshSubagentPop(); // 面板开着时随之刷新（子代理读数每秒都在变）
       }
