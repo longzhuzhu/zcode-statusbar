@@ -214,12 +214,9 @@ const PILL_OF_VIEW = {
   menu: 'gear',
 };
 
-const STAGE_BOTTOM_PAD = { panel: 18, bar: 30 };
-
 function pageHtml(theme, view) {
   const dark = theme === 'dark';
   const click = PILL_OF_VIEW[view] || null;
-  const bottomPad = view === 'bar' ? STAGE_BOTTOM_PAD.bar : STAGE_BOTTOM_PAD.panel;
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <style>
@@ -233,7 +230,7 @@ function pageHtml(theme, view) {
   html, body { height: 100%; }
   .stage {
     display: flex; flex-direction: column; justify-content: flex-end;
-    min-height: 100%; padding: 20px 24px ${bottomPad}px;
+    min-height: 100%; padding: 20px 24px 0;
   }
   .pane { width: 100%; min-width: 0; max-width: 720px; margin: 0 auto; }
   .bubble {
