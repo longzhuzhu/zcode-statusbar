@@ -31,7 +31,7 @@
 
   // ================= 配置常量区 =================
 
-  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.1.0');
+  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.1.1');
 
   // 估算态时效：turn 样本 updatedAt 超过此时长即认为本轮生成结束，切回核实态（会话均）
   var TURN_FRESH_MS = 3000;
@@ -279,12 +279,9 @@
     // 单行铁律：bar 与 pill 一律 nowrap 且 pill 不可收缩（flex:none）。容器收窄时不再换行，
     // 改由 fitBar 的降级阶梯（fit=1..7，见下方 data-fit 规则）逐档让位。
     // safe center：极窄时退化为左对齐，读数从头可见，而不是两端各裁一半。
-    // 底部留白回收：宿主 dock 内容列自带 pb-4(16px)、桌面面板 pb-1(4px)，状态条插在
-    // [data-v4-composer] 之后时这段 20px 会变成条下方的死区（红框实测）。负 margin 把条
-    // 下沉占住该留白，读数贴近窗口底；--zsb-sink 由 mountBar 实测宿主留白后写入，缺省 20px。
     '.zsb-bar{position:relative;display:flex;justify-content:center;justify-content:safe center;',
     'align-items:center;gap:12px;',
-    'min-height:22px;margin-top:4px;margin-bottom:calc(-1 * var(--zsb-sink,20px));',
+    'min-height:22px;margin-top:4px;margin-bottom:8px;',
     'font-family:var(--zcode-font-mono,' + JSON.stringify(DEFAULT_MONO) + ');',
     'font-size:var(--zcode-font-text-sm-size,12px);font-weight:400;line-height:20px;',
     'color:var(--zcode-color-text-secondary,var(--zsb-subtle,#818a8c));',
@@ -318,11 +315,11 @@
     '.zsb-ico svg{width:14px;height:14px;display:block;}',
     '.zsb-num{font-variant-numeric:tabular-nums;}',
     '.zsb-est{animation:zsb-breathe 2s ease-in-out infinite;}',
-    '@keyframes zsb-breathe{0%,100%{opacity:1}50%{opacity:.55}}',
+    '@keyframes zsb-breathe{0%,100%{opacity:1}50%{opacity:.85}}',
     // 运行中子代理呼吸灯：周期/振幅对齐原插件 zupulse。zsb-est 标记估算值，两者语义不同。
     '.zsb-pulse{animation:zsb-pulse 1.6s ease-in-out infinite;}',
     '@keyframes zsb-pulse{0%,100%{opacity:1}50%{opacity:.2}}',
-    '@media (prefers-reduced-motion:reduce){.zsb-pulse{animation:none;opacity:.8}}',
+    '@media (prefers-reduced-motion:reduce){.zsb-est,.zsb-pulse{animation:none;opacity:.8}}',
     // 运行态绿点：只表达"有子代理在跑"，不参与速度语义（速度仍由色阶表达）。
     // 颜色经 --zsb-live 按深浅主题取值（#3ecf8e / #0c8a63，取自原插件 zupulse）。
     '.zsb-livedot{width:6px;height:6px;border-radius:999px;flex:none;background:var(--zsb-live,#3ecf8e);}',
@@ -361,9 +358,7 @@
     '.zsb-ctxrow .v{margin-left:auto;font-variant-numeric:tabular-nums;}',
     '.zsb-ctxsw{width:8px;height:8px;border-radius:2px;flex:none;}',
     // 宽度对齐 deepseek 弹层：标签与读数之间留足呼吸，趋势图可横向铺开更多采样点。
-    // bottom 里加上 --zsb-sink：条自身被负 margin 下沉了 sink 量，弹层要同量抬回，
-    // 否则弹层会被压到条上、下沿被裁。
-    '.zsb-pop{position:absolute;bottom:calc(100% + 10px + var(--zsb-sink,20px));left:50%;',
+    '.zsb-pop{position:absolute;bottom:calc(100% + 10px);left:50%;',
     'transform:translateX(-50%);',
     'min-width:280px;max-width:360px;padding:12px 14px;border-radius:12px;',
     'background:var(--zsb-pop-bg,var(--zsb-pop-bg-fallback,#fff));border:1px solid var(--zsb-pop-border,rgba(0,0,0,.12));',
@@ -502,34 +497,6 @@
     return p;
   }
 
-  // 条下方宿主留白上限：dock pb-4 + 面板 pb-1 合计 20px；超过视为布局异常（如 draft 推荐槽），
-  // 不做下沉——宁可露白也不要让读数压到窗口边缘之外。
-  var SINK_MAX_PX = 24;
-
-  // 实测状态条底边到 dock 内容列（或面板）底边之间的空白，作为下沉量。
-  // 只用 getBoundingClientRect 读一次几何，不写宿主任何属性；异常/读不到即放弃。
-  function sinkIntoDockGap(bar) {
-    try {
-      var dock = bar.parentElement;
-      if (!dock || typeof dock.getBoundingClientRect !== 'function') return;
-      // 沿祖先上溯，取第一个带底部内边距的 dock 容器（宿主 px-2 pb-4 的内容列）
-      var target = dock;
-      for (var i = 0; i < 3 && target; i++) {
-        var cs = W.getComputedStyle ? W.getComputedStyle(target) : null;
-        var padB = cs ? parseFloat(cs.paddingBottom) : NaN;
-        if (isFinite(padB) && padB > 0) break;
-        target = target.parentElement;
-      }
-      if (!target) return;
-      var cs2 = W.getComputedStyle ? W.getComputedStyle(target) : null;
-      var pad = cs2 ? parseFloat(cs2.paddingBottom) : NaN;
-      if (!isFinite(pad) || pad <= 0 || pad > SINK_MAX_PX) return;
-      bar.style.setProperty('--zsb-sink', pad + 'px');
-    } catch (e) {
-      /* 布局读不到：保留 CSS 缺省下沉量 */
-    }
-  }
-
   function mountBar(anchor) {
     var bar = el('div', 'zsb-bar');
     bar.setAttribute('role', 'status');
@@ -590,10 +557,6 @@
     if (!host) return null;
     if (anchor.nextSibling) host.insertBefore(bar, anchor.nextSibling);
     else host.appendChild(bar);
-
-    // 实测条下方到底线的宿主留白，写进 --zsb-sink 让条下沉占住（见 .zsb-bar 注释）。
-    // 读不到布局（测试桩/宿主未挂载）时保留 CSS 缺省值，不写脏值。
-    sinkIntoDockGap(bar);
 
     return {
       bar: bar,
@@ -762,11 +725,11 @@
     var sp = currentSpeed();
     var rTps = el('div', 'zsb-row');
     rTps.appendChild(el('span', 'k', I18N.tps));
-    var tpsVal = el('span', 'v', sp ? Math.round(sp.v) + ' tok/s' : '--');
+    var tpsVal = el('span', 'v zsb-activity-speed', sp ? Math.round(sp.v) + ' tok/s' : '--');
     if (sp) {
       var ramp = rampApi();
       tpsVal.style.color = (ramp && ramp.speedColor(sp.v)) || ''; // 与底部速度数字同色阶
-      if (sp.est) tpsVal.className = 'v zsb-est'; // 估算态呼吸，与底部数字一致
+      if (sp.est) tpsVal.className += ' zsb-est'; // 估算态呼吸，与底部数字一致
     }
     rTps.appendChild(tpsVal);
     pop.appendChild(rTps);
@@ -1344,6 +1307,14 @@
       ui.speedNum.style.color = '';
       ui.speedNum.className = 'zsb-num';
       ui.pills.activity.title = I18N.verifiedTip;
+    }
+    if (popMode === 'activity') {
+      var detailSpeed = ui.pop.querySelector('.zsb-activity-speed');
+      if (detailSpeed) {
+        detailSpeed.textContent = sp ? Math.round(sp.v) + ' tok/s' : '--';
+        detailSpeed.style.color = ui.speedNum.style.color;
+        detailSpeed.className = 'v zsb-activity-speed' + (sp && sp.est ? ' zsb-est' : '');
+      }
     }
 
     // ---- Usage：累计 token · 缓存 N%（缓存已含在输入，不重复相加）----

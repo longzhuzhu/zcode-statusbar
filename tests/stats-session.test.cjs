@@ -39,7 +39,7 @@ function row(over) {
   );
 }
 
-test('rowWindowMs：一律取 completed − started（整段生成跨度），首字时间不参与', () => {
+test('rowWindowMs：缺相对计时指标时回退请求跨度，绝对首字时间不参与', () => {
   // completed(3000) − started(1000) = 2000ms
   assert.equal(rowWindowMs(row()), 2000);
   // 首字紧贴完成时窗口不塌缩：宿主 first_token_at 会取到末段增量时间（实测位于真实
@@ -181,11 +181,11 @@ test('坏行容错：null、非对象、非有限数值字段不抛错、按缺�
     null,
     42,
     'x',
-    row({ outputTokens: '300' }), // 字符串数字：非有限数值类型 → 视为缺失（0 计入速度分母时长）
+    row({ outputTokens: '300' }), // 非数值输出不参与速度
     row({ outputTokens: NaN }),
   ]);
-  // '300' 与 NaN 都不计输出；但两行窗口有效（各 1s），分母 2s → 速度 0
-  assert.equal(agg.sessionAvgTokPerSec, 0);
+  // 缺失输出不能稀释有效请求的速度
+  assert.equal(agg.sessionAvgTokPerSec, null);
   assert.equal(agg.totalTokens, 200); // 仅 input 累计（两行各 100）
 });
 
@@ -472,4 +472,41 @@ test('subagent.list：孤儿条目（有 token 无投影行）key 唯一且不�
   const keys = agg.subagent.list.map((i) => i.key);
   assert.equal(keys.length, 3);
   assert.equal(new Set(keys).size, 3);
+});
+
+
+test('生成速度扣除有效相对 TTFT，均值与趋势共用同一窗口', () => {
+  const rows = [
+    row({ durationMs: 3000, ttftMs: 2000, firstTokenAt: 2990, outputTokens: 200 }),
+    row({ durationMs: 5000, ttftMs: 1000, outputTokens: 400 }),
+    row({ durationMs: 60000, outputTokens: null }),
+    row({ durationMs: 60000, outputTokens: 0 }),
+  ];
+  const result = aggregate(rows);
+  assert.equal(result.sessionAvgTokPerSec, 120);
+  assert.deepEqual(result.speedTrend.map(p => p.tokPerSec), [200, 100]);
+  assert.equal(result.timing.ttftMs, (2000 + 1000 + 1000 + 1000) / 4);
+});
+
+test('计时异常回退、旧库与思考输出保护', () => {
+  for (const ttftMs of [null, NaN, Infinity, -1, 1940, 1990, 2000, 3000]) {
+    assert.equal(rowWindowMs(row({ durationMs: 2000, ttftMs })), 2000);
+  }
+  assert.equal(rowWindowMs(row({ durationMs: 1000, ttftMs: 900 })), 1000);
+  assert.equal(rowWindowMs(row({ ttftMs: 1000 })), 1000);
+  assert.equal(rowWindowMs(row({ durationMs: NaN, ttftMs: 1000 })), 1000);
+  assert.equal(rowWindowMs(row({ durationMs: 3000, ttftMs: 1000, thinking: true })), 3000);
+  assert.equal(rowWindowMs(row({ durationMs: 3000, ttftMs: 1000, model: 'Claude-sonnet' })), 3000);
+  assert.equal(rowWindowMs(row({ startedAt: null, completedAt: null, durationMs: 3000, ttftMs: 1000 })), 2000);
+});
+
+
+test('每个子代理的完成速度独立聚合，不复用所有子代理均值', () => {
+  const result = aggregate([
+    row({ sid: 'sub-a', isSubagent: true, durationMs: 3000, ttftMs: 1000, outputTokens: 200 }),
+    row({ sid: 'sub-b', isSubagent: true, durationMs: 5000, ttftMs: 1000, outputTokens: 100 }),
+    row({ sid: 'sub-b', isSubagent: true, durationMs: 5000, outputTokens: null }),
+  ]);
+  assert.equal(result.subagent.list.find(s => s.key === 'sub-a').tpsAvg, 100);
+  assert.equal(result.subagent.list.find(s => s.key === 'sub-b').tpsAvg, 25);
 });

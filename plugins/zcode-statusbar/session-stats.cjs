@@ -9,11 +9,8 @@
  * 口径（prd R2 / R5 / design §2）：
  * - 完成态速度 = Σ输出 token ÷ Σ生成时长（"会话均"），仅统计主会话完成请求，不含子代理。
  * - 有效生成窗口：200ms ≤ 窗 < 1h。
- * - 生成时长一律取 completed_at − started_at（整段请求跨度）。不按 first_token_at 缩窗：
- *   宿主该列由流式事件时间戳得出，而该时间戳在写队列 flush 时才赋值，实测落在请求跨度的
- *   97%–100% 处（1501 条请求中 632 条的首字窗不足 30ms）。按它缩窗会把 50 tok/s 的请求算成
- *   上万 tok/s，速度趋势因此虚高到 5927 这种量级。思考请求与 Claude 系原先也走同一口径，
- *   现统一，windowBasis 判定随之删除。
+ * - 优先使用 durationMs；普通输出扣除有效 ttftMs，思考请求保留思考阶段。
+ *   不按 firstTokenAt 缩窗：宿主写队列可能把该时间戳延迟到请求末尾。
  * - 总 token = input + output；缓存 token（cache_read/cache_write）已含在 input 中，绝不重复相加。
  * - 缓存命中率 = Σcache_read ÷ Σinput。
  * - 子代理单独聚合：活跃数、活跃速度、会话累计 token；不计入主口径任何字段。
@@ -74,17 +71,23 @@ function countTurns(rows) {
 }
 
 /**
- * 单行生成窗口时长（ms）= completed_at − started_at，即整段请求跨度。
- * 不按 first_token_at 缩窗（原因见文件头口径说明）。
- * 任一时间缺失或 end < started → null（该行不参与速度口径）。
+ * 相对耗时指标优先；旧库回退请求跨度。接近请求末尾的 TTFT 可能是队列 flush，
+ * 不用它缩窗。思考 token 已含在 output 中，不能扣掉首字前的思考阶段。
  */
 function rowWindowMs(row) {
   if (!row || typeof row !== 'object') return null;
   const end = num(row.completedAt);
   const started = num(row.startedAt);
-  if (end == null || started == null) return null;
-  const ms = end - started;
-  return ms >= 0 ? ms : null;
+  const elapsed = end != null && started != null && end >= started ? end - started : null;
+  const duration = num(row.durationMs);
+  const ms = duration != null && duration > 0 ? duration : elapsed;
+  if (ms == null) return null;
+  const thinking = row.thinking === true || /claude/i.test(row.model || '');
+  const ttft = num(row.ttftMs);
+  if (!thinking && ttft != null && ttft >= 0 && ttft < ms * 0.97 && isCountedWindow(ms - ttft)) {
+    return ms - ttft;
+  }
+  return ms;
 }
 
 /** 有效窗口判定：200ms ≤ 窗 < 1h（独立小函数，便于单测边界） */
@@ -171,8 +174,7 @@ function buildSubagentList(rows, now) {
   }
 
   // 第二遍：model 行回填 token / 请求数 / 速度窗口
-  let outSum = 0;
-  let secSum = 0;
+  const speeds = new Map();
   for (const r of rows) {
     if (!r || typeof r !== 'object') continue;
     if (r.kind === 'subagent' || !isSubagent(r)) continue;
@@ -196,9 +198,12 @@ function buildSubagentList(rows, now) {
     const e = num(r.completedAt);
     if (e != null && (target.endedAt == null || e > target.endedAt)) target.endedAt = e;
     const win = rowWindowMs(r);
-    if (isCountedWindow(win)) {
-      outSum += num(r.outputTokens) || 0;
-      secSum += win / 1000;
+    const out = num(r.outputTokens);
+    if (r.status === 'completed' && isCountedWindow(win) && out != null && out > 0) {
+      const speed = speeds.get(target) || { output: 0, seconds: 0 };
+      speed.output += out;
+      speed.seconds += win / 1000;
+      speeds.set(target, speed);
     }
   }
 
@@ -207,7 +212,8 @@ function buildSubagentList(rows, now) {
     const end = it.status === 'running' ? now : it.endedAt;
     it.durationMs = it.startedAt != null && end != null && end >= it.startedAt ? end - it.startedAt : null;
     // 已完成条目的平均速度：会话级加权（口径同主会话），运行中不虚构
-    if (it.status !== 'running' && secSum > 0) it.tpsAvg = outSum / secSum;
+    const speed = speeds.get(it);
+    if (it.status !== 'running' && speed) it.tpsAvg = speed.output / speed.seconds;
   }
 
   const running = list.filter(function (it) { return it.status === 'running'; });
@@ -272,11 +278,11 @@ function aggregate(rows, now) {
     const win = rowWindowMs(r);
     if (!isCountedWindow(win)) continue;
     const out = num(r.outputTokens);
+    if (out == null || out <= 0) continue;
     const sec = win / 1000;
-    // output 缺失按 0 计入：时长仍占分母（保持"Σ输出 ÷ Σ时长"原口径）
-    speedOut += out != null ? out : 0;
+    speedOut += out;
     speedSec += sec;
-    trend.push({ t: num(r.completedAt), tokPerSec: sec > 0 ? (out != null ? out : 0) / sec : 0 });
+    trend.push({ t: num(r.completedAt), tokPerSec: out / sec });
   }
   trend.sort((a, b) => (a.t == null ? 1 : b.t == null ? -1 : a.t - b.t));
   const sessionAvgTokPerSec = speedSec > 0 ? speedOut / speedSec : null;
@@ -299,6 +305,12 @@ function aggregate(rows, now) {
   for (const r of mainCompleted) {
     const s = num(r.startedAt);
     const f = num(r.firstTokenAt);
+    const measured = num(r.ttftMs);
+    if (measured != null && measured >= 0) {
+      ttftSum += measured;
+      ttftN += 1;
+      continue;
+    }
     if (s != null && f != null && f >= s) {
       ttftSum += f - s;
       ttftN += 1;

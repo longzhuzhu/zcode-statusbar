@@ -31,7 +31,7 @@
   /* ---------- 注入诊断快照：install_monitor.py 靠 diag-<n>.json 回写确认注入链路 ---------- */
   try {
     window.__ZCODE_STATUSBAR_DIAG__ = {
-      version: "0.1.0",
+      version: "0.1.1",
       injectedAt: Date.now(),
       bridge: true,
       ua: (typeof navigator !== "undefined" && navigator && navigator.userAgent) || "",

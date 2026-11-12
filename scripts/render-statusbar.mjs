@@ -51,6 +51,8 @@ function mainRequest(i) {
     startedAt: NOW - (40 - i) * 6000,
     firstTokenAt: NOW - (40 - i) * 6000 + 1200,
     completedAt: NOW - (40 - i) * 6000 + 5200,
+    durationMs: 5200,
+    ttftMs: 1200,
     inputTokens: 18400,
     outputTokens: 240,
     cacheReadTokens: 15600,
@@ -233,7 +235,7 @@ function pageHtml(theme, view) {
     display: flex; flex-direction: column; justify-content: flex-end;
     min-height: 100%; padding: 20px 24px ${bottomPad}px;
   }
-  .pane { max-width: 720px; margin: 0 auto; }
+  .pane { width: 100%; min-width: 0; max-width: 720px; margin: 0 auto; }
   .bubble {
     background: ${dark ? '#25262a' : '#f6f7f8'};
     border-radius: 12px; padding: 12px 16px; margin-bottom: 10px;
@@ -249,8 +251,7 @@ function pageHtml(theme, view) {
     background: ${dark ? '#232427' : '#fff'};
     font-size: 13px; color: ${dark ? 'rgba(255,255,255,.4)' : 'rgba(0,0,0,.36)'};
   }
-  // 过渡会把读数截在插值中的帧：圆环描边取不到目标色阶（灰而非橙）。动画同样钉在首帧，
-  // 否则呼吸灯会停在半透明上。估算态与运行态本身仍由文字和绿点表达。
+  /* 截图固定在动画目标色，避免半透明中间帧。 */
   .zsb-ring-fill, .zsb-ctxbar-fill, .zsb-ctxseg { transition: none !important; }
   .zsb-est, .zsb-pulse { animation: none !important; opacity: 1 !important; }
 
@@ -277,6 +278,7 @@ function pageHtml(theme, view) {
   window.__ZCODE_STATUSBAR_TURN__ = ${JSON.stringify(TURN)};
   setInterval(function () {
     window.__ZCODE_STATUSBAR_TURN__.updatedAt = Date.now();
+    window.dispatchEvent(new CustomEvent('zcode-statusbar:turn', { detail: window.__ZCODE_STATUSBAR_TURN__ }));
   }, 200);
 </script>
 <script>${RAMP_SRC}</script>
