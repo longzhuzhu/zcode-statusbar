@@ -1,6 +1,6 @@
 {
   "name": "zcode-statusbar",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "ZCode 客户端状态栏插件：生成速度、累计 token、缓存命中、子代理状态与官方上下文圆环增强",
   "scripts": {
