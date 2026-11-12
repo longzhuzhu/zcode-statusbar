@@ -542,3 +542,34 @@ test('状态条 pill 顺序：子代理排在用量与上下文之间', () => {
     .map((n) => n.dataset.zsbPill);
   assert.deepEqual(order, ['activity', 'usage', 'subagent', 'context', 'gear']);
 });
+
+test('运行中条目带上子会话时，面板只出一行且显示任务名（不只剩尾号）', () => {
+  const env = loadStatusbar();
+  env.window.dispatchEvent(
+    new env.window.CustomEvent('zcode-statusbar:session', {
+      detail: detailWith([
+        // 运行中的 Agent 投影行已带子会话 id（内核侧修好后就是这个形状）
+        projected({ id: 'call_live', childSessionId: 'sess_subagent_agent_e0c5b6xx', status: 'running', startedAt: 5000 }),
+        Object.assign(projected({}), {
+          id: 'm1',
+          kind: 'model',
+          sid: 'sess_subagent_agent_e0c5b6xx',
+          childSessionId: 'sess_subagent_agent_e0c5b6xx',
+          status: 'completed',
+          startedAt: 5000,
+          firstTokenAt: 5100,
+          completedAt: 7000,
+          inputTokens: 100,
+          outputTokens: 300,
+        }),
+      ]),
+    })
+  );
+  const pill = subPill(env);
+  pill.dispatchEvent({ type: 'click', target: pill });
+  const rows = findByClass(popOf(env), 'zsb-subrow');
+  assert.equal(rows.length, 1, '同一次派发不该出现两条');
+  const text = fullText(rows[0]);
+  assert.ok(text.includes('调研布局'), '任务名照常显示');
+  assert.ok(!text.includes('#e0c5b6'), '不该退化成尾号占位');
+});

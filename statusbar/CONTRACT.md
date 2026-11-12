@@ -78,7 +78,8 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
                                   // tokPerSec 与 sessionAvgTokPerSec 同口径（单请求 = output ÷ 有效生成窗（§4.3））
   subagent: {
     activeCount: number,          // status==='running' 的子代理数（按 list 统计，含仅有投影行的运行中条目）
-    activeTokPerSec: number|null, // 运行中子代理 Σ输出 ÷ Σ(now−首字) ，200ms 下限
+    activeTokPerSec: number|null, // 运行中子代理的实时速度合计（见 §4.3.2）：各条目 tpsLive 的
+                                  // Σ输出 ÷ Σ生成窗；无近期段为 null（宿主运行期不写 running 行）
     sessionTokens: number,        // 子代理 Σ(input+output)
     rows: [{ id, model, status, outputTokens }],       // 旧形状，保留兼容；最近 ≤20 行
     list: [subagentItem]          // 面板条目（§4.2.1），运行中在前按 startedAt 升序，已完成按 endedAt 降序
@@ -152,22 +153,36 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
 {
   key: string,                  // 去重键：有子会话时用 childSessionId，否则用 toolCallId
   toolCallId: string|null,      // Agent 工具调用 id，运行中必有
-  childSessionId: string|null,  // sess_subagent_+agentId，运行中为 null
+  childSessionId: string|null,  // sess_subagent_+agentId；运行中同样关联（见下）
   type: string|null,            // subagent_type；缺 part 时为 null（不猜）
   task: string|null,            // Agent 输入的 description；缺 part 时为 null
   status: 'running' | 'completed' | 'error' | 'cancelled',
   startedAt: number|null,
   endedAt: number|null,         // 运行中恒为 null
   durationMs: number|null,      // 运行中 = now − startedAt（实时）；已结束 = endedAt − startedAt
-  requests: number,             // 已完成请求数（运行中为 0）
+  requests: number,             // 已完成请求数（运行中 = 已跑完的段数）
   inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens: number,
-  tpsAvg: number|null           // 已完成段加权平均；运行中为 null（不虚构速度）
+  tpsAvg: number|null,          // 已完成条目：已完成段加权平均；运行中为 null
+  tpsLive: number|null          // 运行中条目：近期已完成段的加权速度；无近期段为 null
 }
 ```
 
 合并规则：`kind='subagent'` 行提供存在性与任务名，`kind='model'` 且 `isSubagent` 的行按
 `childSessionId` 回填 token 与请求数。对不上任何投影行的 model 行独立成条（token 有、任务名为 null），
 不与其他子代理合并。条目上限 `SUBAGENT_DETAIL_MAX`（20）。
+
+**运行中条目也带 `childSessionId`。** 宿主在派发后即建子会话（实测 < 2s），回执要等子代理
+收工才写进 `part.output`；在此之前 `_sub_agent_tasks` 用「子会话 title = prompt 前 57 字符 +
+`...`」做唯一前缀匹配认领。这条关联是同一次派发在面板里只出现一条的唯一依据——若运行中条目
+丢掉它，该子会话的 model 行会被当成孤儿另起一条，而孤儿没有 `task`/`type`，UI 只能退化成
+`#尾号`。匹配不唯一（同前缀多候选）时宁可不认领，保持 `null`。
+
+**运行期速度走 `tpsLive`，来源是「近期已完成段」。** 宿主在整个子代理跑完之前不写
+`status='running'` 的 model 行（实库 1092 条子代理行里 0 条 running），所以运行期唯一可用的
+实时证据是该子代理**刚跑完的请求段**（每轮工具循环结束就落库一条）。`tpsLive` = 这些段的
+Σ输出 ÷ Σ生成窗，只收 `completedAt` 距今 ≤ `ACTIVE_WINDOW_MS`（2 分钟）的段；窗口过宽会把
+上一轮的旧读数当成当下速度，过窄则在长工具调用期间闪烁。汇总口径 `activeTokPerSec` 取各
+运行中条目 `tpsLive` 的合计，任一环节缺读数即为 `null`，UI 显占位而不伪造。
 
 ### 4.4 上下文来源明细（`bridge.getContextBreakdown()` 返回）
 
@@ -189,7 +204,11 @@ detail 顶层是 zusage 快照原样（`today` / `session` / `recent` / `known_s
   `system_tool_schemas` / `mcp_tool_schemas` / `messages`）。statusbar.js 用 `CTX_BUCKET_OF`
   表把它们归三桶（系统提示词 / 工具定义 / 对话消息），**未登记的 source 不计入**，
   比例在已知来源内归一。
-- 图例读数域是**占比**（桶内 chars ÷ 全部已知 chars），不是 deepseek 的原始 token 数。
+- 图例读数域是 **token 数**（deepseek `ContextMeter` 同款，带 `~` 前缀）。取值方式是按
+  **份额分配**而非独立折算：`头部 used × (桶内 chars ÷ 全部已知 chars)`。宿主 breakdown 只
+  上报 chars（surface 组成的本地估算），与头部 `used`（提供方精确水位）不同源；独立按字符
+  折算会让三行之和与头部对不上（实测差约三倍）。按份额分配则三行恒等于头部，也与分段条
+  的几何一一对应。`~` 表示这是按比例切分的值，不是 provider 逐项计数。
 - 只在弹层打开时读一次，不进 1s 渲染循环；会话切换（`unmountBar`）时连同 `state.context` 一并清空。
 - 桥无 `getContextBreakdown` 时 statusbar.js 回退到 `getSessionSnapshot().snapshot.usage.contextWindow.breakdown`。
 
@@ -244,12 +263,19 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 
 ## 7. 持久化与其他键
 
-- localStorage `zcode-statusbar.pills`：`{ activity, usage, context, subagent, gear }` 五个布尔显示开关（R7，即时生效，卸载保留）。
+- localStorage `zcode-statusbar.pills`：`{ activity, usage, context, subagent }` 四个布尔显示开关（R7，即时生效，卸载保留）。
+  齿轮不在开关表内：它是齿轮菜单的唯一入口，关掉后无从恢复，故常驻不可隐。旧版本写入的 `gear` 键
+  落在白名单外，读取时忽略，升级后自动回到常驻。
 - DOM：statusbar.js 样式节点 id `zcode-statusbar-style`；条根元素 class `zsb-bar`；pill 标记 `data-zsb-pill`；
   pill 名与视觉顺序 `activity` / `usage` / `subagent` / `context` / `gear`；上下文圆环填充环 class `zsb-ring-fill`；
   子代理运行态绿点 class `zsb-livedot`（附 `zsb-pulse` 呼吸）；
   子代理面板行 `data-subkey`（值为条目 `key`）、行状态点 class `zsb-subdot`（运行中加 `zsb-live` 标绿）、
   返回按钮 `data-act="sub-back"`。
+- 齿轮菜单开关项右侧勾选列：class `tick`，勾选态加 `on`，两态都绘制 14px 方框图标（勾选态实心 + 反白对勾，
+  未勾态淡描边），色值取 `--zsb-accent`（浅色 `#3b82f6`、深色 `#4d93f8`）。
+- 弹层标题：`.zsb-pop .zsb-pop-title{font-weight:700;font-size:calc(var(--zcode-font-text-sm-size,12px) + 1px);line-height:22px;margin-bottom:8px;}`；
+  菜单分组标题 `.zsb-menu-title{font-weight:700;margin-bottom:4px;}`。层级由字重、字号与分组分隔线共同表达（见 §9 偏差 20）。
+- 菜单页脚 `zsb-menu-ver`：两端对齐，左侧「版本」标签、右侧号值（`vX.Y.Z`），与其他动作项的左边线共列。
 - 子代理 pill 的显隐不只看开关：本会话从未出现过子代理时整只不占位，出现过后常驻。
   粘滞标志 `state.subSeen` 是会话级状态，`unmountBar()`（换会话）时重置，跨会话不继承。
   用户开关优先级更高：`visible.subagent === false` 时粘滞标志不使它显示。
@@ -272,8 +298,9 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
    （shim 把 window 事件翻译进 `__ZCODE_STATUSBAR_REQUESTS__` 队列，由 pollPluginRequests 白名单执行；
    见 core/inject-main.cjs 的 EVENT_SHIM / forceRefresh / runUninstallAndRelaunch）。
    `:reset-session` 无内核消费方：纯渲染端行为（本地清显示），事件保留作扩展点。
-7. **身份**：桥缺失或 `getPaneId()` 为空时 statusbar 不渲染（常驻轮询，身份恢复即自动挂上）；
-   诊断文本可从菜单"复制诊断"获取。
+7. **身份**：桥缺失或 `getPaneId()` 为空时 statusbar 不渲染（常驻轮询，身份恢复即自动挂上）。
+   渲染端只写 `window.__ZCODE_STATUSBAR_DIAG__`（见 §2），内核把它落盘为 `diag-<n>.json`；
+   菜单不再提供"复制诊断"入口，排障一律读该文件与 `statusbar.log`。
 
 ## 8. 与 design §9 的偏差登记（汇总）
 

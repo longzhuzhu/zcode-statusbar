@@ -44,7 +44,7 @@ ZCode 默认只在生成结束后给出 token 总数。生成过程中模型多�
 
 ![用量弹层](docs/screenshots/panel-usage.png)
 
-**上下文**：已用比例、分段占用条、系统提示词 / 工具定义 / 对话消息三项占比。
+**上下文**：已用比例、分段占用条、系统提示词 / 工具定义 / 对话消息三项 token 数（按份额从总水位切分，`~` 表示非逐项精确计数）。
 
 ![上下文弹层](docs/screenshots/panel-context.png)
 

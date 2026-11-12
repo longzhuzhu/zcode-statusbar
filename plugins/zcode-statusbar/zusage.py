@@ -676,8 +676,9 @@ def _sub_list(sub_rows, sub_index, sub_gen, agent_tools, now_ms):
         call, status = _col(t, "tool_call_id"), _col(t, "status")
         if not call or status not in _SUBAGENT_STATUSES:
             continue
-        # 运行中条目一律 childSessionId=null：子会话此时还没有回执可关联
-        child = "" if status == "running" else (child_of.get(call) or "")
+        # 运行中条目也认领子会话（标题前缀匹配，回执未写出时唯一可用）：不认领就会与
+        # 该子会话的 model 行各出一条，用户看到同一次派发出现两条、孤儿那条只剩尾号。
+        child = child_of.get(call) or ""
         if child in seen or ("call:" + call) in seen:
             continue   # 已有 model 行聚合条目或已产过本行
         started, ended = _col(t, "started_at"), _col(t, "completed_at")
@@ -1373,7 +1374,12 @@ def _model_row_cols(con):
 def _subagent_rows_of(con, sid, tools):
     """父会话的 kind='subagent' 行：一条 Agent 工具行一条记录，task / type / 子会话
     取自 _sub_agent_tasks 的同一次 part 扫描（不新增第三次扫描）。part 缺失或解析失败
-    只丢名字，条目照出；同一 callID 的重试行只取最新一条。"""
+    只丢名字，条目照出；同一 callID 的重试行只取最新一条。
+
+    运行中条目同样带 childSessionId：宿主在派发后即时建好子会话（实测 < 2s），回执行
+    要等子代理收工才写进 part.output，但标题前缀匹配在运行期已能唯一认领。这一层关联
+    是「运行中条目 + 它的子会话 model 行」合并成一条的唯一依据——丢掉它，聚合层会把
+    同一次派发拆成两条（运行中一条、无任务名的孤儿一条）。"""
     try:
         idx = _sub_agent_tasks(con, sid)
     except sqlite3.Error:
@@ -1387,8 +1393,7 @@ def _subagent_rows_of(con, sid, tools):
             continue
         seen.add(call)
         meta = dict(calls.get(call) or {})
-        if (_col(t, "status") or "") != "running":
-            meta["child"] = child_of.get(call)
+        meta["child"] = child_of.get(call)
         rows.append(_subagent_contract_row(t, sid, meta))
     return rows
 

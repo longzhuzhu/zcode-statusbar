@@ -36,6 +36,10 @@
 const MIN_WINDOW_MS = 200;
 // 有效生成窗口上限（ms）：1 小时，滤掉挂起的僵尸行
 const MAX_WINDOW_MS = 60 * 60 * 1000;
+// 运行中子代理的速度回推窗口（ms）：只认该子会话最近 2 分钟内跑完的请求段。
+// 宿主运行期不写 running 行，实时证据只有「刚完成的段」；窗口过宽会把子代理上一轮的
+// 旧读数当成当下速度（用户看到条上一个不动的假读数），过窄则在长工具调用期间闪烁成 --。
+const ACTIVE_WINDOW_MS = 2 * 60 * 1000;
 // 速度趋势保留轮数（R6"最近速度趋势"占位数据接口）
 const TREND_MAX = 10;
 // 子代理明细弹层最多展示的行数
@@ -140,6 +144,9 @@ function buildSubagentList(rows, now) {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       tpsAvg: null,
+      tpsLive: null,
+      recentOut: 0,
+      recentSec: 0,
     };
   }
 
@@ -198,12 +205,27 @@ function buildSubagentList(rows, now) {
     const e = num(r.completedAt);
     if (e != null && (target.endedAt == null || e > target.endedAt)) target.endedAt = e;
     const win = rowWindowMs(r);
+    if (r.status === 'running') {
+      // 运行中的 model 行（宿主若写）：窗口取 now − 首字，与主口径同用 200ms 下限
+      const from = num(r.firstTokenAt) != null ? num(r.firstTokenAt) : s;
+      const dur = from != null ? now - from : null;
+      if (!isCountedWindow(dur)) continue;
+      target.recentOut += num(r.outputTokens) || 0;
+      target.recentSec += dur / 1000;
+      continue;
+    }
     const out = num(r.outputTokens);
-    if (r.status === 'completed' && isCountedWindow(win) && out != null && out > 0) {
+    if (isCountedWindow(win) && out != null && out > 0) {
       const speed = speeds.get(target) || { output: 0, seconds: 0 };
       speed.output += out;
       speed.seconds += win / 1000;
       speeds.set(target, speed);
+      // 近期已完成段：宿主运行期不写 running 行（实库 0 条），运行中条目的实时速度
+      // 只能靠「刚跑完的请求段」回推——每轮工具循环结束就落库一条。
+      if (e != null && now - e <= ACTIVE_WINDOW_MS) {
+        target.recentOut += out;
+        target.recentSec += win / 1000;
+      }
     }
   }
 
@@ -211,9 +233,14 @@ function buildSubagentList(rows, now) {
   for (const it of list) {
     const end = it.status === 'running' ? now : it.endedAt;
     it.durationMs = it.startedAt != null && end != null && end >= it.startedAt ? end - it.startedAt : null;
-    // 已完成条目的平均速度：会话级加权（口径同主会话），运行中不虚构
-    const speed = speeds.get(it);
-    if (it.status !== 'running' && speed) it.tpsAvg = speed.output / speed.seconds;
+    if (it.status === 'running') {
+      // 运行中用近期段的加权速度；无近期段 → null，UI 显占位而不伪造
+      it.tpsLive = it.recentSec > 0 ? it.recentOut / it.recentSec : null;
+    } else {
+      // 已完成条目的平均速度：按条目各自加权（口径同主会话），运行中不虚构
+      const speed = speeds.get(it);
+      if (speed) it.tpsAvg = speed.output / speed.seconds;
+    }
   }
 
   const running = list.filter(function (it) { return it.status === 'running'; });
@@ -347,24 +374,20 @@ function aggregate(rows, now) {
   // 存在性证据（宿主跑完才写 model_usage），model 行则提供 token。
   const subList = buildSubagentList(rows, now);
   let activeCount = subList.filter(function (it) { return it.status === 'running'; }).length;
-  let activeOut = 0;
-  let activeSec = 0;
+  // 运行中汇总速度 = 各运行中条目的实时速度合计。同一条子代理的近期段已在
+  // buildSubagentList 里累计过，这里只按条目合并，无实时读数的条目不计入。
+  let liveOut = 0;
+  let liveSec = 0;
+  for (const it of subList) {
+    if (it.status !== 'running' || it.tpsLive == null) continue;
+    liveOut += it.recentOut;
+    liveSec += it.recentSec;
+  }
   let subSessionTokens = 0;
   for (const r of subRows) {
     const inTok = num(r.inputTokens);
     const outTok = num(r.outputTokens);
     subSessionTokens += (inTok != null ? inTok : 0) + (outTok != null ? outTok : 0);
-    if (r.status !== 'running') continue;
-    // activeCount 已按面板条目算过：这里的 model 行只补速度窗口，不重复计数
-    // 活跃速度窗口：now −（首字时间优先，缺则 started_at）；与主口径同用 200ms 下限滤抖动
-    const start = num(r.startedAt);
-    const first = num(r.firstTokenAt);
-    const from = first != null ? first : start;
-    if (from == null) continue;
-    const dur = now - from;
-    if (!isCountedWindow(dur)) continue;
-    activeOut += outTok != null ? outTok : 0;
-    activeSec += dur / 1000;
   }
 
   return {
@@ -380,7 +403,7 @@ function aggregate(rows, now) {
     speedTrend: trend.slice(-TREND_MAX),
     subagent: {
       activeCount,
-      activeTokPerSec: activeSec > 0 ? activeOut / activeSec : null,
+      activeTokPerSec: liveSec > 0 ? liveOut / liveSec : null,
       sessionTokens: subSessionTokens,
       rows: subRows.slice(-SUBAGENT_DETAIL_MAX).map(function (r) {
         return {
