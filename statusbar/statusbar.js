@@ -168,6 +168,7 @@
   var DEFAULT_MONO =
     'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", ' +
     '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", monospace';
+  var DEFAULT_UI = '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif';
 
   // ================= 运行时状态 =================
 
@@ -281,8 +282,8 @@
     // safe center：极窄时退化为左对齐，读数从头可见，而不是两端各裁一半。
     '.zsb-bar{position:relative;display:flex;justify-content:center;justify-content:safe center;',
     'align-items:center;gap:12px;',
-    'min-height:22px;margin-top:4px;margin-bottom:8px;',
-    'font-family:var(--zcode-font-mono,' + JSON.stringify(DEFAULT_MONO) + ');',
+    'min-height:22px;margin-top:4px;margin-bottom:4px;',
+    'font-family:var(--zcode-font-mono,' + DEFAULT_MONO + ');',
     'font-size:var(--zcode-font-text-sm-size,12px);font-weight:400;line-height:20px;',
     'color:var(--zcode-color-text-secondary,var(--zsb-subtle,#818a8c));',
     'font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none;z-index:60;',
@@ -326,8 +327,8 @@
     '.zsb-livedot.zsb-pulse{animation:zsb-pulse 1.6s ease-in-out infinite;}',
     // 子代理面板：分组 + 每行「状态点 类型 任务 →」。省略号统一给中间的任务列，
     // 类型与箭头固定在两端，行宽不随任务文本跳动。
-    '.zsb-subgroup{margin-top:10px;}',
-    '.zsb-subgroup:first-child{margin-top:0;}',
+    '.zsb-subgroup{margin-top:12px;padding-top:10px;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent);}',
+    '.zsb-subgroup:first-child{margin-top:0;padding-top:0;border-top:0;}',
     '.zsb-subrow{display:flex;align-items:center;gap:6px;line-height:24px;padding:1px 4px;border-radius:6px;',
     'border:0;background:transparent;color:inherit;font:inherit;font-size:inherit;text-align:left;',
     'width:100%;cursor:pointer;font-variant-numeric:tabular-nums;}',
@@ -349,7 +350,7 @@
     '.zsb-ctxseg{display:block;height:100%;flex:none;min-width:2px;transition:width .3s ease;}',
     // 头部：读数与总量同时可见，读数为强调色、其余为弱化色（对齐 deepseek header 层级）
     '.zsb-ctx-head{display:flex;align-items:baseline;gap:6px;line-height:22px;}',
-    '.zsb-ctx-headline{opacity:.7;}',
+    '.zsb-ctx-headline{font-weight:700;}',
     '.zsb-ctx-percent{font-weight:500;}',
     '.zsb-ctx-figures{margin-left:auto;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap;}',
     '.zsb-ctxlist{margin-top:8px;}',
@@ -363,15 +364,16 @@
     'min-width:280px;max-width:360px;padding:12px 14px;border-radius:12px;',
     'background:var(--zsb-pop-bg,var(--zsb-pop-bg-fallback,#fff));border:1px solid var(--zsb-pop-border,rgba(0,0,0,.12));',
     'box-shadow:0 8px 28px rgba(0,0,0,.18);color:var(--zcode-color-text-primary,var(--zsb-primary,#232629));',
+    'font-family:var(--zsb-font-ui,' + DEFAULT_UI + ');font-weight:400;font-synthesis:weight;',
     'font-variant-numeric:tabular-nums;text-align:left;z-index:70;}',
     '.zsb-pop[hidden]{display:none;}',
-    '.zsb-pop-title{font-weight:500;margin-bottom:8px;}',
+    '.zsb-pop .zsb-pop-title{font-weight:700;font-size:calc(var(--zcode-font-text-sm-size,12px) + 1px);line-height:22px;margin-bottom:8px;}',
     '.zsb-row{display:flex;justify-content:space-between;gap:16px;line-height:22px;}',
     '.zsb-row .k{opacity:.85;white-space:nowrap;}',
     '.zsb-row .v{white-space:nowrap;}',
     // 工具名行截断：长工具名（如 MCP 全名）不撑破 max-width:360px 的弹层（.k 默认 nowrap 不截断）
     '.zsb-row .zsb-tool-k{min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '.zsb-sec{margin-top:10px;}',
+    '.zsb-sec{margin-top:12px;padding-top:10px;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent);}',
     // 速度趋势折线图：SVG 按容器像素宽定点绘制，文字/网格线经类名统一弱化着色
     '.zsb-trend{height:64px;margin-top:4px;}',
     '.zsb-trend svg{display:block;width:100%;height:64px;}',
@@ -382,7 +384,7 @@
     '.zsb-trend .zsb-tick{fill:currentColor;opacity:.55;}',
     '.zsb-trend .zsb-tnow{font-weight:500;}',
     '.zsb-menu{display:flex;flex-direction:column;min-width:180px;}',
-    '.zsb-menu-title{opacity:.7;margin-bottom:4px;}',
+    '.zsb-menu-title{font-weight:700;margin-bottom:4px;}',
     '.zsb-mi{display:flex;justify-content:space-between;align-items:center;gap:12px;border:0;background:transparent;',
     'color:inherit;font:inherit;line-height:26px;padding:0 4px;border-radius:6px;cursor:pointer;text-align:left;white-space:nowrap;}',
     '.zsb-mi:hover{background:color-mix(in srgb,currentColor 10%,transparent);}',
@@ -416,11 +418,13 @@
     }
     // 官方变量桥接（research/zcode-official-context.md）：--font-mono / --text-ui-sm / --color-foreground(-subtle)
     var mono = hostVar('--font-mono');
+    var sans = hostVar('--font-sans');
     var smSize = hostVar('--text-ui-sm');
     var subtle = hostVar('--color-foreground-subtle');
     var primary = hostVar('--color-foreground');
     var bg = hostVar('--color-background');
     if (mono) root.style.setProperty('--zcode-font-mono', mono);
+    if (sans) root.style.setProperty('--zsb-font-ui', sans);
     if (smSize) root.style.setProperty('--zcode-font-text-sm-size', smSize);
     if (subtle) root.style.setProperty('--zcode-color-text-secondary', subtle);
     if (primary) root.style.setProperty('--zcode-color-text-primary', primary);
@@ -734,7 +738,7 @@
     rTps.appendChild(tpsVal);
     pop.appendChild(rTps);
     var trendSec = el('div', 'zsb-sec');
-    trendSec.appendChild(el('div', 'k', I18N.trend));
+    trendSec.appendChild(el('div', 'zsb-pop-title', I18N.trend));
     var trend = Array.isArray(s.speedTrend) ? s.speedTrend : [];
     if (!trend.length) {
       trendSec.appendChild(el('div', 'k', I18N.noData));
@@ -1255,6 +1259,26 @@
     fitSpan = pillsSpan(); // 记录收敛后的跨度，作为下一轮的稳态判据
   }
 
+  function balanceDockGap() {
+    if (!ui || !mountAnchor || !W.innerHeight || !W.getComputedStyle) return;
+    try {
+      var bar = ui.bar;
+      var box = bar.getBoundingClientRect();
+      var topGap = box.top - mountAnchor.getBoundingClientRect().bottom;
+      var margin = parseFloat(W.getComputedStyle(bar).marginBottom);
+      var dockGap = W.innerHeight - box.bottom - margin;
+      // 只补偿窗口底部已知大小的 dock 留白，避免浮动/嵌入布局产生过大的负 margin。
+      if (!isFinite(topGap) || !isFinite(margin) || !isFinite(dockGap) || topGap < 0 || dockGap < -0.5 || dockGap > 24) {
+        if (bar.style.marginBottom) bar.style.marginBottom = '';
+        return;
+      }
+      var next = topGap - Math.max(0, dockGap);
+      if (Math.abs(next - margin) > 0.5) bar.style.marginBottom = next + 'px';
+    } catch (e) {
+      /* 无布局信息时保留 CSS 默认间距 */
+    }
+  }
+
   // 会话数据规范化：内核 session 事件的 detail 为 { ...zusage 快照, aggregate }（聚合缝
   // 包裹，见 inject-main.cjs handlePayload / CONTRACT.md §7.2）；本 UI 只消费 aggregate
   // 形状（CONTRACT.md §4.2）。非包裹路径（detail 即 aggregate）按特征键识别放行；
@@ -1369,6 +1393,7 @@
       ui.bar.dataset.sub = subRunning ? 'run' : 'idle';
     }
     fitBar();
+    balanceDockGap();
   }
 
   // ================= 上下文占用（R4，读宿主隐藏锚点；缺失静默） =================
@@ -1629,6 +1654,7 @@
     try {
       resizeObserver = new RO(function () {
         fitBar();
+        balanceDockGap();
       });
       resizeObserver.observe(target);
     } catch (e) {
