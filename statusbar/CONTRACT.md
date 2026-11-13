@@ -28,7 +28,7 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_TURN_API__` | turn-stats.js | 内核/诊断 | `{ setCharsPerToken(v), calibrateFromTurn({outputTokens, charCount}), reset(), stop() }`（自校准钩子） |
 | `__ZCODE_STATUSBAR_RAMP__` | 加载器（组装自 ramp.js） | statusbar.js | `{ speedColor(tokPerSec), contextColor(pct0to1) }`；缺失 → 数字与上下文圆环退中性灰 |
 | `__ZCODE_STATUSBAR_BRIDGE__` | 内核静态桥 | statusbar.js | `{ getPaneId(): string\|null, getSessionSnapshot(): object\|null, getContextBreakdown(): object\|null }`；身份不可确认时三者返回 null |
-| `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.2.0'`（与 package.json 同步） |
+| `__ZCODE_STATUSBAR_VERSION__` | 加载器（可选） | statusbar.js | 版本号字符串；缺省内置 `'0.2.1'`（与 package.json 同步） |
 | `__ZCODE_STATUSBAR_I18N__` | 加载器（可选） | statusbar.js | 文案覆盖对象，键见 statusbar.js 的 I18N 常量（宿主语言覆盖点） |
 | `__ZCODE_STATUSBAR_STREAM_TEXT__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本；优先于长度钩子与 DOM |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
@@ -334,3 +334,4 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 21 | 以所属 `[data-session-id]` 面板内边缘为准，按输入框到状态条的间距（默认 4px）平衡底部；仅回收可由祖先 padding/border/margin 解释的尾部空白 | 移除窗口高度与 24px 阈值；面板外间隙保持原样，嵌套容器、缩放与上下分屏均在自己的面板内计算。存在后续流内容、未知占位或无法测量时回退正常流；观察 dock 到面板路径上的尺寸变化，宿主样式只读。官方输入框 `[data-v4-composer]` 优先于启发式锚点 | statusbar.js `dockBottomMargin` / `watchResize`；`npm run test:layout` 浏览器回归 |
 | 22 | 底部速度数字与活动弹层 TPS 改取 `speedTrend` 末点；`sessionAvgTokPerSec` 挪到弹层独立行「会话均速」 | 两处读数此前分别是会话加权均值与趋势末点，同一弹层里印出 14 与 50 两个 tok/s，用户无法判断哪个是当前速度。均值会被历史长请求（含客户端准入/重试等待）长期压低，不适合当"当前速度"；改为与曲线末点同源后两处恒等，均值保留为独立可比值 | statusbar.js `currentSpeed` / `sessionAvgSpeed` / `buildActivityDetail`；§4.1 |
 | 23 | 活动弹层改为活弹层：session 帧到达时与子代理面板一样重建 | 原实现只在打开时生成 timing 与趋势曲线，之后仅更新 TPS 一行，于是新 TPS 与旧曲线、旧耗时并排显示，关掉重开才同步。重建走 `openPop` 复用同一套装配，避免为三个字段写增量更新路径 | statusbar.js `refreshLivePop`；测试「活动弹层随新聚合帧刷新耗时与曲线」 |
+| 24 | 底部留白补偿以状态条 CSS `margin-top` 为固定目标；纵向 flex 的非起始对齐保留宿主排版 | AskUserQuestion 展开等高度变化期间，实测输入框到状态条的间距会受底部 margin 影响。将该间距反馈成下一轮 margin 会在刷新时反复改变布局；不再将宿主分配的剩余空间当成可回收留白 | statusbar.js `dockBottomMargin`；`npm run test:interaction` 逐帧检查位移、回答、焦点与统计刷新 |

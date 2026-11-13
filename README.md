@@ -180,6 +180,7 @@ python3 core/install.py --dev                           # 注入直指仓库，�
 node scripts/render-statusbar.mjs                       # 重新生成 README 里的截图
 npm ci                                                  # 安装开发用浏览器测试依赖
 npm run test:layout                                     # 会话面板布局回归（需 Chrome/Chromium）
+npm run test:interaction                                # AskUserQuestion 展开/回答/收起与逐帧稳定性
 ```
 
 `--dev` 模式不复制运行时，注入行指向克隆目录，改完 `statusbar/statusbar.js` 刷新窗口就能看到效果。切回标准安装，再跑一次不带 `--dev` 的。
