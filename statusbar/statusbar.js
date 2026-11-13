@@ -1254,8 +1254,15 @@
       var box = bar.getBoundingClientRect();
       var scale = box.height / bar.offsetHeight;
       if (!(scale > 0) || !isFinite(scale)) return null;
-      var gap = (box.top - anchor.getBoundingClientRect().bottom) / scale;
-      var margin = parseFloat(W.getComputedStyle(bar).marginBottom);
+      var hostStyle = W.getComputedStyle(bar.parentElement);
+      if ((hostStyle.display === 'flex' || hostStyle.display === 'inline-flex') &&
+          /^column/.test(hostStyle.flexDirection) &&
+          hostStyle.justifyContent !== 'normal' && hostStyle.justifyContent !== 'flex-start' &&
+          hostStyle.justifyContent !== 'start') return null;
+      var barStyle = W.getComputedStyle(bar);
+      // 实测 gap 会随底部 margin 参与宿主剩余空间分配，不能作为下一轮调整的目标。
+      var gap = parseFloat(barStyle.marginTop);
+      var margin = parseFloat(barStyle.marginBottom);
       if (!isFinite(gap) || gap < 0 || !isFinite(margin)) return null;
 
       var inset = 0;
