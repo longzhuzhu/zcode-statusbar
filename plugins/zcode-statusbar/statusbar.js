@@ -31,7 +31,7 @@
 
   // ================= 配置常量区 =================
 
-  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.1.3');
+  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.2.0');
 
   // 估算态时效：turn 样本 updatedAt 超过此时长即认为本轮生成结束，切回核实态（会话均）
   var TURN_FRESH_MS = 3000;
