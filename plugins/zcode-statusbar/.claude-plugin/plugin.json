@@ -1,6 +1,6 @@
 {
   "name": "zcode-statusbar",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "ZCode composer status bar: visual tok/s speed ramp, cumulative tokens, cache hit and subagent state under the input box, plus a color-ramp enhancement for the official context ring. Auto-installs via app.asar injection whenever the client is not injected (always on; a remove/uninstall writes an opt-out marker; modifies app.asar - fully quit and reopen ZCode to take effect). No per-answer text lines, no prompt-submit context injection, no cost/quota features, no network except the Release updater.",
   "author": {
     "name": "zcode-statusbar contributors"
