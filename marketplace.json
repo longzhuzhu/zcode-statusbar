@@ -16,8 +16,8 @@
       "author": {
         "name": "zcode-statusbar contributors"
       },
-      "homepage": "https://github.com/zcode-statusbar/zcode-statusbar",
-      "repository": "https://github.com/zcode-statusbar/zcode-statusbar",
+      "homepage": "https://github.com/longzhuzhu/zcode-statusbar",
+      "repository": "https://github.com/longzhuzhu/zcode-statusbar.git",
       "license": "MIT",
       "keywords": [
         "statusbar",
