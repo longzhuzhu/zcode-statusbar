@@ -20,6 +20,11 @@
 注入顺序约束：ramp 必须先于 statusbar.js（后者每次使用时动态读全局，晚到也能生效，但建议按序）；
 bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无「放弃窗口」），否则首轮取不到身份（防串数，R10）。
 
+**可重复注入**：四个资产会被内核拼成一串在页面全局求值，资产 mtime 变化后整串重注入。
+任何顶层 `const`/`let`/`class` 都会在第二轮抛 `Identifier 'X' has already been declared`，
+SyntaxError 中断整串、后续资产不再执行（表现为「改了代码界面没变化」）。所有注入资产
+必须用 IIFE 收紧作用域；回归 `npm run test:inject-chain`。
+
 ## 2. 全局变量
 
 | 全局 | 生产者 | 消费者 | 说明 |
@@ -33,7 +38,8 @@ bridge 必须先于 statusbar.js 的首次挂载探测（常驻 1s 轮询，无�
 | `__ZCODE_STATUSBAR_STREAM_TEXT__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本；优先于长度钩子与 DOM |
 | `__ZCODE_STATUSBAR_STREAM_LENGTH__` | 内核（可选钩子） | turn-stats.js | 函数，返回当前流式输出文本长度（store 直喂，优先于 DOM 选择器） |
 | `__ZCODE_STATUSBAR_STREAM_SELECTORS__` | 内核/诊断（可选） | turn-stats.js | 数组，覆盖默认 DOM 选择器候选 |
-| `__ZCODE_STATUSBAR_DIAG__` | statusbar.js | 内核（diag 轮询） | `{ version, stage, ts, mounted, paneId, lastError, hasBridge, hasRamp, hasTurn, hasSession }`；挂载各分支实时更新，供 `diag-<n>.json` 落盘 |
+| `__ZCODE_STATUSBAR_DIAG__` | statusbar.js | 内核（diag 轮询） | `{ version, stage, ts, mounted, paneId, lastError, hasBridge, hasRamp, hasTurn, hasSession, bar }`；挂载各分支实时更新，供 `diag-<n>.json` 落盘 |
+| `__ZCODE_STATUSBAR_DISPOSE__` | statusbar.js | 内核（热重载） | 函数，拆条并清理定时器、ResizeObserver 与全局监听。内核重载串以调用它开头；缺失时旧实例残留，每轮重载叠加一条状态条。statusbar.js 启动时另扫一次同页孤儿条，收掉旧版本遗留的实例 |
 
 ## 3. window 事件（全部在 `window` 上派发/监听）
 
