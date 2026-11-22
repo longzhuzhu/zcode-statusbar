@@ -20,6 +20,8 @@
  * 2. 齿轮"重置会话统计"除派发 "zcode-statusbar:reset-session" 外，本地同步清空显示（用户即时反馈）。
  * 3. 上下文占用由本状态条自带的圆环 pill 承载（R4），官方上下文按钮的 DOM/样式/交互一概不改写；
  *    数据读宿主隐藏锚点 [data-usage-used] / [data-usage-max]（官方同源口径）。
+ * 4. 弹层水平位置不再恒居中，改为中心锚定被点击的 pill，越界夹进视口留 8px；打开期间跟随
+ *    pill 重排，锚点 pill 被降级阶梯隐藏时自动关闭（CONTRACT §9 偏差 27，实现见 placePop）。
  */
 
 (function () {
@@ -626,15 +628,68 @@
 
   // ================= 弹层管理 =================
 
+  // 弹层水平锚定：弹层是 bar 的绝对定位子节点，bar 整体位移（窗口缩放、sticky 换位）
+  // 时它自动跟随，只有 pill 在 bar 内的相对位置变了才需要重算。
+  // mode 与 pill 名不同（menu ↔ gear），映射集中在此，不散落到五处点击绑定。
+  var POP_PILL = { activity: 'activity', usage: 'usage', subagent: 'subagent', context: 'context', menu: 'gear' };
+  var popAnchor = null; // 当前锚定的 pill 名，null = 未打开
+  var POP_MARGIN = 8; // 视口内边距
+
+  function resetPopAnchor() {
+    if (!ui || !ui.pop) return;
+    ui.pop.style.transform = '';
+    ui.pop.removeAttribute('data-zsb-anchor');
+  }
+
+  // 弹层中心对齐被点 pill 中心，越界夹进视口。
+  // 保留 CSS 的 left:50% 作为基准位置（弹层的 shrink-to-fit 可用宽度依赖它，改动会
+  // 波及弹层宽度），只把 transform 从 -50% 换成目标位移：最终左沿 = 基准位置 + 位移
+  // = pill 中心 − 弹层半宽。位移全程在布局坐标系（offsetLeft/offsetWidth，不受宿主
+  // transform/zoom 影响），只在夹取时读一次 bar 的视口矩形。
+  function placePop() {
+    if (!ui || !ui.pop || !popMode || !popAnchor) return;
+    // 单测 DOM 桩无几何 API：不定位也不判隐藏，保持弹层可见（否则 offsetWidth 缺失
+    // 会被误当成「pill 已隐藏」而关掉弹层）。
+    if (typeof ui.bar.getBoundingClientRect !== 'function') return;
+    var pill = ui.pills[popAnchor];
+    if (!pill || !pill.offsetWidth) {
+      closePop(); // 降级阶梯把锚点 pill 隐掉了：弹层留在无主位置没有意义
+      return;
+    }
+    var popW = ui.pop.offsetWidth;
+    var barW = ui.bar.offsetWidth;
+    var barRect = ui.bar.getBoundingClientRect();
+    if (!popW || !barW || !barRect.width) return;
+    var scale = barRect.width / barW;
+    if (!(scale > 0) || !isFinite(scale)) return;
+    var baseX = ui.pop.offsetLeft; // CSS left:50% 的基准位置
+    var desired = pill.offsetLeft + pill.offsetWidth / 2 - popW / 2 - baseX;
+    var viewportW = D.documentElement.clientWidth || W.innerWidth || 0;
+    if (viewportW) {
+      var min = (POP_MARGIN - barRect.left) / scale - baseX;
+      var max = (viewportW - POP_MARGIN - barRect.left) / scale - popW - baseX;
+      // 视口窄到装不下弹层最小宽度时 min > max：取 min，允许右侧溢出。
+      desired = Math.max(min, Math.min(desired, max));
+    }
+    ui.pop.setAttribute('data-zsb-anchor', popAnchor);
+    // 同值跳写：render 每秒都会调到这里，取整后位置通常不变。
+    // transform 不参与 offsetLeft/offsetWidth 的测量，跳写不会形成反馈环。
+    var next = 'translateX(' + Math.round(desired) + 'px)';
+    if (ui.pop.style.transform !== next) ui.pop.style.transform = next;
+  }
+
   function closePop() {
     if (!ui) return;
     ui.pop.hidden = true;
     popMode = null;
+    popAnchor = null;
+    resetPopAnchor();
   }
 
   function openPop(mode) {
     if (!ui) return;
     popMode = mode;
+    popAnchor = POP_PILL[mode] || null;
     ui.pop.innerHTML = '';
     if (mode === 'activity') buildActivityDetail(ui.pop);
     else if (mode === 'usage') buildUsageDetail(ui.pop);
@@ -648,6 +703,7 @@
       return;
     }
     ui.pop.hidden = false;
+    placePop(); // 解除隐藏后才有弹层像素宽
     layoutTrend(); // activity 弹层解除隐藏后才有容器像素宽，此时补画趋势图
   }
 
@@ -1543,6 +1599,7 @@
     }
     fitBar();
     balanceDockGap();
+    placePop(); // 读数变宽或档位重排会挪 pill：弹层打开时跟着重新对齐
   }
 
   // ================= 上下文占用（R4，读宿主隐藏锚点；缺失静默） =================
@@ -1825,6 +1882,7 @@
         } else {
           balanceDockGap(); // 回退挂载：沿用旧的对称间距补偿
         }
+        placePop();
       });
       var pane = mountAnchor && mountAnchor.closest(SESSION_SELECTOR);
       for (var node = target; node; node = node.parentElement) {

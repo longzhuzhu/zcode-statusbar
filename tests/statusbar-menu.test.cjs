@@ -261,3 +261,13 @@ test('齿轮菜单：勾选用复选框图标，勾选态蓝色实心，两态�
   assert.match(SRC, /\.zsb-mi \.tick\{[^}]*color:var\(--zsb-accent\)/, '勾选列取强调色（蓝）');
   assert.match(SRC, /--zsb-accent', dark \? '#4d93f8' : '#3b82f6'/, '强调色为官方蓝，深色提亮');
 });
+
+test('锚定：几何 API 缺失的桩环境不误判「pill 已隐藏」，弹层照常打开', () => {
+  const env = loadStatusbar();
+  const { pop } = mountMenu(env);
+  // 桩里 pill 没有 offsetWidth / getBoundingClientRect：定位逻辑必须整段跳过，
+  // 而不是把缺失当成 offsetWidth === 0（否则 offwidth 缺失会误关每一个弹层）。
+  assert.equal(pop.hidden, false, '弹层保持打开');
+  assert.equal(pop.style.transform, undefined, '桩环境不写位移');
+  assert.equal(pop.getAttribute('data-zsb-anchor'), null, '桩环境不写锚点标记');
+});

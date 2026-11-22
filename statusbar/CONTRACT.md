@@ -291,6 +291,8 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
   粘滞标志 `state.subSeen` 是会话级状态，`unmountBar()`（换会话）时重置，跨会话不继承。
   用户开关优先级更高：`visible.subagent === false` 时粘滞标志不使它显示。
 - 子代理 pill 双态：运行中 = 绿点 · 速度（不显示活跃数，个数见面板分组标题）；闲 = 会话累计 token。
+- 弹层锚点标记 `data-zsb-anchor`（写在 `.zsb-pop` 上，值为当前锚定的 pill 名 `activity` / `usage` / `subagent` /
+  `context` / `gear`）：打开时写入、关闭时移除，供自动化断言与真机排查确认锚定目标（见 §9 偏差 27）。
 - CSS 变量：`--zcode-font-mono` / `--zcode-font-text-sm-size` / `--zcode-color-text-secondary`（宿主值采样自
   `--font-mono` / `--text-ui-sm` / `--color-foreground-subtle`，缺省官方 mono 栈与 12px，见 R12 与 research）；
   `--zsb-live`（子代理运行态绿点，深色 `#3ecf8e` / 浅色 `#0c8a63`，由 `applyThemeVars` 按主题写入）。
@@ -343,3 +345,4 @@ ramp 缺失的降级：速度/子代理速度数字与上下文圆环描边均�
 | 24 | 底部留白补偿以状态条 CSS `margin-top` 为固定目标；纵向 flex 的非起始对齐保留宿主排版 | AskUserQuestion 展开等高度变化期间，实测输入框到状态条的间距会受底部 margin 影响。将该间距反馈成下一轮 margin 会在刷新时反复改变布局；不再将宿主分配的剩余空间当成可回收留白 | statusbar.js `dockBottomMargin`；`npm run test:interaction` 逐帧检查位移、回答、焦点与统计刷新 |
 | 25 | 间距补偿一律在「无补偿基准态」下测量：取几何前先清掉自身写入的 `margin-bottom`，判定与写入解耦，非 null 目标无条件写回 | 宿主 dock 为滚动容器内 `sticky bottom-0` 时，补偿 margin 会经 sticky 钳制与宿主滞后重测量反馈进实测 inset，两态 guard 互斥、渲染节奏驱动持续交替（真机采样证实，见 docs/scroll-bottom-oscillation.md）。基准态测量使每轮从同一自然几何收敛到同一目标；无条件写回是因为测量用的清零必须被恢复，「同值跳写」会残留清零态反而制造新交替 | statusbar.js `dockBottomMargin` / `balanceDockGap`；`npm run test:scroll-stability`；diag `bar.margin`/`bar.top` 真机验收 |
 | 26 | 挂载点从「composer 元素之后（滚动容器内）」改为「滚动容器之父节点末尾（滚动容器外）」，并用负 `margin-bottom` 吸收宿主留在该层的 `padding-bottom` | 滚动容器（`overflow-y:auto`）是最近的裁剪祖先，状态条住在容器内时其可视下沿即容器底沿，「贴窗口底」与「完整可见」在该位置零和。真机 3.19.1 实测：容器外遗留 `timeline pb-4`(16px) + `#content pb-1`(4px)，加上自身 4px margin 构成截图红框里 24px 死区，且 `clippingAncestor` 把回收范围限制在容器内后一行都收不到。移到容器外后两者不再冲突：负 margin 取 `-(paddingBottom − 8px)`，让条底距面板底 8px、与上方 margin-top 的 8px 相等（全吸收会压到 `#content pb-1` 上，真机观感是贴死边框、且上下不对称）。结构认不出（无裁剪祖先、裁剪祖先是 pane、或宿主无 `getComputedStyle`）时回退到旧挂载并沿用偏差 25 的补偿，宁可有死区不丢条 | statusbar.js `resolveSlot` / `placeInSlot` / `applySlotMargin`；回退路径 `dockBottomMargin` / `balanceDockGap`；`npm run test:composer-dock`（断言基准为窗口底）、`npm run test:scroll-stability`；diag `slot`/`padBottom` |
+| 27 | 弹层水平位置从「固定居中于状态条」改为「中心锚定被点击的 pill」，越界时夹进视口留 8px | 弹层是 `.zsb-bar` 的绝对定位子节点，原先靠 `left:50% + translateX(-50%)` 恒居中，无论点哪个 pill 都在同一位置弹出，与点击位置没有视觉关联。改为读 pill 的 `offsetLeft/offsetWidth` 求中心，只写 `transform:translateX()`、保留 CSS `left:50%` 作为基准位置——弹层的 shrink-to-fit 可用宽度依赖 `left`，改动它会连带改变弹层宽度（activity 弹层的趋势图按容器像素宽定点绘制）。重算挂在 `render()` 与 ResizeObserver 回调里（均在 `fitBar` 之后），不新增 resize/scroll 监听：弹层作为 bar 的子节点随 bar 整体位移自动跟随，只有 pill 在 bar 内的相对位置变化才需要重算。锚点 pill 被降级阶梯隐藏（`offsetWidth === 0`）时自动关闭弹层，不留无主弹层；无几何 API 的环境（单测 DOM 桩）整段跳过，不因测量能力缺失误判隐藏而关闭弹层 | statusbar.js `placePop` / `resetPopAnchor` / `POP_PILL`；`npm run test:layout`（逐 pill 居中、贴边夹取、pill 隐藏自动关闭）；测试「锚定：几何 API 缺失的桩环境不误判」 |
