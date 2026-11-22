@@ -110,6 +110,9 @@ function loadStatusbar(opts) {
   const window = {
     document,
     __ZCODE_STATUSBAR_BRIDGE__: { getPaneId: () => 'pane-test', getSessionSnapshot: () => null },
+    // 加载器（inject-main.cjs）在真实运行时注入版本号；桩里同样注入，
+    // 否则页脚只能显示 unknown（statusbar.js 不再回落到伪造的版本号）。
+    __ZCODE_STATUSBAR_VERSION__: '0.2.2',
     localStorage: { getItem: () => save, setItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     listeners: {},
