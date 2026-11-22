@@ -135,7 +135,30 @@ try {
     assert.deepEqual(after.composer, first.composer, label + ' 后输入框位置不得漂移: ' + JSON.stringify({ first, after }));
   }
 
-  console.log('Passed composer-dock: 状态条在输入框下方、完整可见、热重载不累积');
+  // D：不带 cleanup 的重复注入（dom-ready 与 did-finish-load 同毫秒各触发一次的形态）
+  // 也必须收敛到一条：实例自己接管清理，旧实例停手后不能再把条挂回来。
+  for (let i = 1; i <= 2; i++) {
+    await page.evaluate((src) => { (0, eval)(src); }, ASSETS);
+    await page.waitForTimeout(2400); // 跨过旧实例那一轮 1s 轮询才看得出是否会复活
+    const after = await measure();
+    const label = 'bare re-inject #' + i;
+    assert.equal(after.count, 1, label + ' 后应仍只有一条状态条: ' + JSON.stringify({ after, errors }));
+    assert.deepEqual(after.composer, first.composer, label + ' 后输入框位置不得漂移: ' + JSON.stringify({ first, after }));
+  }
+
+  // E：采样循环只能有一套。重复注入若各留一个 100ms 定时器，turn 事件会成倍派发。
+  const turnRate = await page.evaluate(async () => {
+    const before = window.__ZCODE_STATUSBAR_TURN_API__;
+    let n = 0;
+    const on = () => { n++; };
+    window.addEventListener('zcode-statusbar:turn', on);
+    await new Promise((r) => setTimeout(r, 1500));
+    window.removeEventListener('zcode-statusbar:turn', on);
+    return { sameApi: window.__ZCODE_STATUSBAR_TURN_API__ === before, turns: n };
+  });
+  assert.equal(turnRate.sameApi, true, '重复注入后应只有最后一套采样 API: ' + JSON.stringify(turnRate));
+
+  console.log('Passed composer-dock: 状态条在输入框下方、完整可见、重载与重复注入都不累积');
   await page.close();
 } finally {
   await browser.close();

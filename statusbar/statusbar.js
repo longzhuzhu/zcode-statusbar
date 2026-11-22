@@ -29,6 +29,17 @@
   var W = window;
   var D = document;
 
+  // 幂等：同一页面只允许一个实例。内核注入路径里 dom-ready 与 did-finish-load
+  // 会在同一毫秒各触发一次（真机日志实证），且 hook 可能因重复注册叠加监听；
+  // 实例自己接管清理，第二次进入时先让前一个实例完全停手再继续。
+  if (typeof W.__ZCODE_STATUSBAR_DISPOSE__ === 'function') {
+    try {
+      W.__ZCODE_STATUSBAR_DISPOSE__();
+    } catch (e) {
+      /* 前一个实例清理失败：继续装配，残留由下方孤儿清理兜底 */
+    }
+  }
+
   // ================= 配置常量区 =================
 
   var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.2.1');

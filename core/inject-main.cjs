@@ -1055,9 +1055,17 @@ setInterval(() => { if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("pl
 if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message));
 
 const skipLogged = new Set();   // 每窗口只记一次跳过原因（导航会反复触发，防刷屏）
+/* 注入幂等：一次页面加载只注入一次。dom-ready 与 did-finish-load 会在同一毫秒
+ * 双双触发（真机 3.19.1 日志 13:14:15.342 两条 injected），早期两函数各注入一遍，
+ * 页面里就叠两个实例——旧实例轮询把被清掉的条又挂回来，表现为两条状态条。
+ * 用「执行中 + 已完成」双旗标收口；hot reload 与整页导航各自重开一轮。 */
+const injectState = new Map();   // wc.id → 'running' | 'done'
+function resetInjectState(wcId) {
+  injectState.delete(wcId);
+}
 function injectStatusbar(wc, reload = false) {
   if (!isMainWindowState(wc) || wc.isDestroyed()) return;
-  if (!isLocalHostPage(wc)) {   // 主窗但非宿主本地页：排障关键场景，原因落盘（每窗口一次）
+  if (!isLocalHostPage(wc)) {   // 主窗但非宿主本地页：排障关键场景，原因落盘（每窗一次）
     if (!skipLogged.has(wc.id)) {
       skipLogged.add(wc.id);
       let url = "";
@@ -1066,13 +1074,16 @@ function injectStatusbar(wc, reload = false) {
     }
     return;
   }
+  if (!reload && injectState.has(wc.id)) return;   // 本轮页面已注入：dom-ready/did-finish-load 不再重复
   const cleanup = '(function(){if(window.__ZCODE_STATUSBAR_DISPOSE__)window.__ZCODE_STATUSBAR_DISPOSE__();window.__ZCODE_STATUSBAR__=false;})();\n';
   /* 注入顺序固定：bridge → turn-stats → ramp → statusbar → 事件桥接 shim（各自幂等）。
    * 缺失的资产跳过（statusbar 侧文件未同步时降级为只注入内核 shim，DB 轮询链兜底）。 */
   const src = [rendererSrc.bridge, rendererSrc.turnStats, rendererSrc.ramp, rendererSrc.statusbar, EVENT_SHIM]
     .filter((s) => s).join("\n;\n");
   if (!src) { LOG("inject aborted: no renderer assets present in", HERE); return; }
+  injectState.set(wc.id, 'running');
   wc.executeJavaScript((reload ? cleanup : "") + src, true).then(() => {
+    injectState.set(wc.id, 'done');
     LOG("injected", reload ? "(hot reload)" : "", "into wc#" + wc.id);
     /* 无条件推送：updater 不可用时也要让面板拿到状态真值 */
     pushPluginState(wc, pluginUpdater ? pluginUpdater.status() : {});
@@ -1081,15 +1092,23 @@ function injectStatusbar(wc, reload = false) {
     if (lastGoodPayload) {
       pushSession(wc, lastGoodPayload);
     }
-  }).catch(() => { });
+  }).catch((e) => {
+    resetInjectState(wc.id);   // 执行失败：允许下一个事件重试
+    LOG("inject failed into wc#" + wc.id + ":", (e && e.message) || String(e));
+  });
 }
 
+const hooked = new Set();   // 已挂过监听器的 wc.id：hook 被重复调用时不再叠加监听
 const hook = (wc) => {
   if (!isMainWindowState(wc)) return;
+  if (hooked.has(wc.id)) return;
+  hooked.add(wc.id);
   startResident();   // 首个主窗出现即预热常驻 python：与其后 ≤1s 的页面装载重叠，
                      // 省重启后首查的串行解释器启动；预热后无查询则随 30s 空闲自停回收。
   wc.on("destroyed", () => {
     activeSid.delete(wc.id);
+    injectState.delete(wc.id);
+    hooked.delete(wc.id);
     if (!hasWindows()) {
       clearTimeout(retryTimer);
       lastWants = "";
@@ -1099,7 +1118,12 @@ const hook = (wc) => {
   });
   /* dom-ready 即注入：did-finish-load 要等全部子资源结束才触发，重启后条晚出现数秒；
    * dom-ready 在 DOM 可用时到达，statusbar 自带输入框轮询等待。did-finish-load 保留
-   * 兜底（SPA 内部导航后重新装载的情况）。 */
+   * 兜底（SPA 内部导航后重新装载的情况）。两者可能同毫秒触发，由 injectStatusbar
+   * 的单次门收口。整页导航（非 SPA 内跳转）会重新执行脚本，故在提交点重置门。 */
+  wc.on("did-start-navigation", (event) => {
+    if (event && event.isSameDocument) return;   // SPA 内跳转不重注入
+    resetInjectState(wc.id);
+  });
   wc.on("dom-ready", () => injectStatusbar(wc));
   wc.on("did-finish-load", () => injectStatusbar(wc));
   if (wc.isLoading()) return;
