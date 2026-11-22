@@ -1076,13 +1076,31 @@ function injectStatusbar(wc, reload = false) {
   }
   if (!reload && injectState.has(wc.id)) return;   // 本轮页面已注入：dom-ready/did-finish-load 不再重复
   const cleanup = '(function(){if(window.__ZCODE_STATUSBAR_DISPOSE__)window.__ZCODE_STATUSBAR_DISPOSE__();window.__ZCODE_STATUSBAR__=false;})();\n';
+  /* 版本号必须由加载器注入：statusbar.js 只读 window.__ZCODE_STATUSBAR_VERSION__，
+   * 未注入时回落 'unknown'。此前没有这一步，diag 与齿轮页脚长期显示伪造的 0.2.1，
+   * 真机排障无法判断实际在跑哪一版。
+   * 不能只问 updater：initPluginUpdater 晚于首轮 hook，首次注入时它还是 null（真机
+   * 实测首帧版本取到 unknown）。plugin-runtime.json 是同步落盘的运行时版本记录，
+   * 与 updater 同源且随时可读，故作为首选，updater 兜底。 */
+  let injectedVersion = "unknown";
+  try {
+    const rt = JSON.parse(fs.readFileSync(path.join(HERE, "plugin-runtime.json"), "utf8"));
+    if (rt && typeof rt.version === "string" && rt.version) injectedVersion = rt.version;
+  } catch (e) { /* 记录缺失/损坏：继续尝试 updater */ }
+  if (injectedVersion === "unknown") {
+    try {
+      const st = pluginUpdater && pluginUpdater.status && pluginUpdater.status();
+      if (st && typeof st.currentVersion === "string" && st.currentVersion) injectedVersion = st.currentVersion;
+    } catch (e) { /* updater 也不可用：保留 unknown，不猜版本 */ }
+  }
+  const versionShim = "window.__ZCODE_STATUSBAR_VERSION__=" + JSON.stringify(injectedVersion) + ";\n";
   /* 注入顺序固定：bridge → turn-stats → ramp → statusbar → 事件桥接 shim（各自幂等）。
    * 缺失的资产跳过（statusbar 侧文件未同步时降级为只注入内核 shim，DB 轮询链兜底）。 */
   const src = [rendererSrc.bridge, rendererSrc.turnStats, rendererSrc.ramp, rendererSrc.statusbar, EVENT_SHIM]
     .filter((s) => s).join("\n;\n");
   if (!src) { LOG("inject aborted: no renderer assets present in", HERE); return; }
   injectState.set(wc.id, 'running');
-  wc.executeJavaScript((reload ? cleanup : "") + src, true).then(() => {
+  wc.executeJavaScript((reload ? cleanup : "") + versionShim + src, true).then(() => {
     injectState.set(wc.id, 'done');
     LOG("injected", reload ? "(hot reload)" : "", "into wc#" + wc.id);
     /* 无条件推送：updater 不可用时也要让面板拿到状态真值 */

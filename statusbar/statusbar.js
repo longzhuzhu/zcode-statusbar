@@ -42,10 +42,17 @@
 
   // ================= 配置常量区 =================
 
-  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.2.1');
+  // 加载器注入的版本号。未注入时显式标 unknown：此前回落到硬编码 '0.2.1'，
+  // 于是 diag 里永远显示 0.2.1（连 0.2.2 也报 0.2.1），排障时无法判断真机在跑哪版。
+  var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || 'unknown');
 
   // 估算态时效：turn 样本 updatedAt 超过此时长即认为本轮生成结束，切回核实态（会话均）
   var TURN_FRESH_MS = 3000;
+  // 状态条上下两条间距（px）。视觉对称要求「条到输入框」= 「条到面板底」：
+  // 上面由 CSS margin-top（BAR_GAP_ABOVE）决定，下面由这里吸收宿主 padding 后的余量决定。
+  // 分开设而不是只调下面，是因为下面还叠着壳层的透明 pb-1，仅调底部会一边贴一边空。
+  var BAR_GAP_ABOVE = 8;
+  var BAR_GAP_BELOW = 8;
   // 挂载/会话探测周期：SPA 内切换任务不重注入脚本，需常驻低频轮询——
   // 进入会话时挂载、回到 draft 或无会话时卸载。
   var MOUNT_POLL_MS = 1000;
@@ -305,6 +312,12 @@
     'color:var(--zcode-color-text-secondary,var(--zsb-subtle,#818a8c));',
     'font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none;z-index:60;',
     'white-space:nowrap;}',
+    // 滚动容器外挂载（data-zsb-slot=outer）时条挂在 timeline 上，而 timeline 是窗格
+    // 全宽；宿主输入卡片的宽度基准是 dock-content 的 max-w-6xl（72rem=1152px）居中。
+    // 不套同样的约束，条会按窗格全宽居中——真机实测条右沿超出卡片右沿 220px，观感
+    // 是「左右间隙不对等」。这里复刻同样的宽度上限、居中与 px-2。
+    '.zsb-bar[data-zsb-slot="outer"]{width:100%;max-width:72rem;margin-left:auto;margin-right:auto;',
+    'box-sizing:border-box;padding-left:8px;padding-right:8px;}',
     '.zsb-pill{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:8px;',
     'border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;',
     'font-variant-numeric:tabular-nums;transition:background-color .15s ease,color .15s ease;',
@@ -581,15 +594,22 @@
     bar.appendChild(pGear);
     bar.appendChild(pop);
 
-    // 插到输入框容器正下方
-    var host = anchor.parentElement;
-    if (!host) return null;
-    if (anchor.nextSibling) host.insertBefore(bar, anchor.nextSibling);
-    else host.appendChild(bar);
+    // 优先挂到滚动容器之外（见 resolveSlot）；结构不认识时回退到输入框容器正下方。
+    var slot = resolveSlot(anchor);
+    if (slot) {
+      placeInSlot(bar, slot);
+    } else {
+      var host = anchor.parentElement;
+      if (!host) return null;
+      bar.setAttribute('data-zsb-slot', 'inner');
+      if (anchor.nextSibling) host.insertBefore(bar, anchor.nextSibling);
+      else host.appendChild(bar);
+    }
 
     return {
       bar: bar,
       pop: pop,
+      slot: slot, // null = 回退到 region 之后的旧挂载
       pills: { activity: pAct, usage: pUsage, context: pCtx, subagent: pSub, gear: pGear },
       activityLabel: actLabel,
       speedNum: speedNum,
@@ -1270,6 +1290,62 @@
     return pane;
   }
 
+  // 挂载槽位：把条放在滚动容器【外】的那一层（timeline），并用自身负 margin 吸收宿主
+  // 留在容器外的底部 padding。
+  //
+  // 宿主 3.19.1 的层级（app.asar 反查）：timeline(pb-4) > scroll(overflow-y:auto) > … >
+  // dock(sticky bottom-0) > dock-content > region[data-testid=v4-composer]。滚动容器是
+  // 裁剪祖先，条若住在容器内，其可视下沿就是容器底，「贴底」与「完整可见」在该位置零和
+  // ——这正是底部 24px 死区反复回归的根源。搬到容器外后两者不再冲突：条贴 timeline 的
+  // padding-box 底，负 margin 等于 padding 时条底正好落在 #content 的 pb-1 上（4px）。
+  //
+  // 结构不认识时返回 null，调用方回退到「region 之后」的旧挂载：宁可有死区，不丢条。
+  function resolveSlot(anchor) {
+    // 单测的 DOM 桩没有 getComputedStyle：视作结构不认识，走回退挂载。
+    if (typeof W.getComputedStyle !== 'function') return null;
+    var pane = null;
+    try {
+      pane = anchor.closest(SESSION_SELECTOR);
+    } catch (e) {
+      return null;
+    }
+    if (!pane) return null;
+    var clip = clippingAncestor(anchor, pane);
+    // clip === pane 表示一路到面板都没有滚动容器：dock 不在可裁剪容器内，结构已变
+    if (!clip || clip === pane) return null;
+    // 必须确实是滚动容器（overflow-y 为 auto/scroll 且内容可滚）。仅「overflow 非
+    // visible」不够：overflow:hidden 的外壳、或退化后一路冒泡到的任意裁剪层都会命中，
+    // 把条挂到不该挂的层级。宿主滚不动时贴底语义也不成立，一并按结构认不出处理。
+    var clipStyle = W.getComputedStyle(clip);
+    var ovY = clipStyle.overflowY;
+    if (ovY !== 'auto' && ovY !== 'scroll') return null;
+    if (!(clip.scrollHeight > clip.clientHeight + 1)) return null;
+    var host = clip.parentElement;
+    // 宿主槽位不能脱离本会话面板：否则条会挂到别的窗格/页面层级上
+    if (!host || !pane.contains(host)) return null;
+    var padBottom = parseFloat(W.getComputedStyle(host).paddingBottom) || 0;
+    return { host: host, clip: clip, padBottom: padBottom };
+  }
+
+  // 把条放进槽位并写入负 margin。padding 随断点变化时重算（见 watchResize）。
+  function placeInSlot(bar, slot) {
+    slot.host.appendChild(bar); // scroll 之后即 timeline 最后一个子节点
+    bar.setAttribute('data-zsb-slot', 'outer');
+    applySlotMargin(bar, slot);
+  }
+
+  function applySlotMargin(bar, slot) {
+    // 上下对称：上方 margin-top 与下方余量都取同一个期望值。下面只吸收
+    // 「padding − 余量」——全吸收会把条压到宿主 pb-1 上，真机观感是贴死边框。
+    bar.style.marginTop = BAR_GAP_ABOVE + 'px';
+    var absorb = Math.max(0, slot.padBottom - BAR_GAP_BELOW);
+    bar.style.marginBottom = absorb > 0 ? -absorb + 'px' : '';
+  }
+
+  // ===== 回退挂载的间距补偿 =====
+  // 只在 resolveSlot 判不出「滚动容器 + 其父层」时使用（结构未知的宿主、以及
+  // test:layout / test:interaction 这类非滚动夹具）。此时条的上下间距仍按旧语义
+  // 对称平衡，保持与旧版本完全一致的行为——回退路径的意义就是「不知道就照旧」。
   function dockBottomMargin(bar, anchor) {
     // 基准态测量：先清掉自身写入的补偿再取几何。补偿 margin 会经 sticky 钳制、flex
     // 剩余空间与宿主滞后重测量（虚拟化列表、输入框自适应）反馈进实测 inset——真机
@@ -1293,9 +1369,8 @@
       var margin = parseFloat(barStyle.marginBottom);
       if (!isFinite(gap) || gap < 0 || !isFinite(margin)) return null;
 
-      // 只在最近的裁剪祖先内回收空白。宿主 dock 位于滚动容器内时，容器外的
-      // padding（如真机 timeline 的 pb-4）不在可视区内，回收它会把状态条压到裁剪
-      // 边界上，余量归零后被裁掉——真机 3.19.1 实测该情形下条底正好落在视口底。
+      // 只在最近的裁剪祖先内回收空白：容器外的 padding 不在可视区内，回收它会把
+      // 状态条压到裁剪边界上，余量归零后被裁掉。
       var clip = clippingAncestor(bar, pane);
       var inset = 0;
       var node = bar;
@@ -1321,6 +1396,8 @@
   }
 
   function balanceDockGap() {
+    // 滚动容器外挂载时 margin 由 applySlotMargin 决定，不参与任何反馈环。
+    if (mountSlot) return;
     if (!ui || !mountAnchor || !W.getComputedStyle) return;
     var bar = ui.bar;
     // dockBottomMargin 测量前会清掉补偿，所以非 null 必须无条件写回——
@@ -1572,6 +1649,9 @@
         hasSession: !!state.session,
         sessionReal: !!state.mounted,
         bar: barState,
+        // 挂载槽位：outer = 滚动容器外（死区可归零）；inner = 回退挂载（结构不认识）
+        slot: mountSlot ? 'outer' : (ui && ui.bar ? 'inner' : null),
+        padBottom: mountSlot ? mountSlot.padBottom : null,
       };
     } catch (e) {
       /* 诊断写入失败静默 */
@@ -1584,6 +1664,7 @@
 
   var mountTimer = null;
   var mountAnchor = null; // 当前挂载的输入框容器（用于检测宿主换 DOM 后重挂）
+  var mountSlot = null; // 滚动容器外的挂载槽位 { host, clip, padBottom }；回退挂载时为 null
   var disposers = []; // 全局监听/定时器的清理函数，热重载时由 dispose() 统一回收
 
   // 会话身份：以挂载点所在 SessionPane 的 data-session-id 为准。
@@ -1613,6 +1694,7 @@
     if (ui && ui.bar && ui.bar.parentNode) ui.bar.parentNode.removeChild(ui.bar);
     ui = null;
     mountAnchor = null;
+    mountSlot = null;
     state.mounted = false;
     state.context = null;
     state.breakdown = null; // 换会话必须丢弃上一会话的来源明细（防串数）
@@ -1666,6 +1748,7 @@
     }
     ui = mounted;
     mountAnchor = anchor;
+    mountSlot = mounted.slot || null;
     state.mounted = true;
     state.paneId = ident.paneId;
     state.lastError = null;
@@ -1735,7 +1818,13 @@
     try {
       resizeObserver = new RO(function () {
         fitBar();
-        balanceDockGap();
+        // 断点切换会改宿主 timeline 的底部 padding：重新读一次，负 margin 跟着变。
+        if (mountSlot && mountSlot.host === ui.bar.parentElement) {
+          mountSlot.padBottom = parseFloat(W.getComputedStyle(mountSlot.host).paddingBottom) || 0;
+          applySlotMargin(ui.bar, mountSlot);
+        } else {
+          balanceDockGap(); // 回退挂载：沿用旧的对称间距补偿
+        }
       });
       var pane = mountAnchor && mountAnchor.closest(SESSION_SELECTOR);
       for (var node = target; node; node = node.parentElement) {
@@ -1866,6 +1955,7 @@
     if (ui && ui.bar && ui.bar.parentNode) ui.bar.parentNode.removeChild(ui.bar);
     ui = null;
     mountAnchor = null;
+    mountSlot = null;
     state.mounted = false;
   }
 

@@ -2,34 +2,46 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { CHROME } from './render-statusbar.mjs';
 
-// 滚动到底部的间距补偿振荡回归：宿主 dock 是滚动容器内的 sticky bottom-0（v4 真机布局），
-// bar 的 margin-bottom 参与内容高度后，sticky 钳制偏移会随补偿翻转，把 dockBottomMargin 的
-// 实测 inset 推过 ±1 容差——两个 margin 状态在 guard 下互斥，渲染节奏驱动两态交替
-// （真机采样：marginBottom 在 -12px 与 "" 间 ~5Hz 翻转，bar 位移 4px，atBottom 反复横跳）。
-// 不变量：无论从哪个 margin 起点出发，渲染必须收敛到同一终态且不再交替。
-const STICKY_HOST_HTML = (SRC) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+// 滚动到底部时的间距振荡回归。
+//
+// 历史：0.1.x 用 dockBottomMargin 在滚动容器内回收底部空白，补偿 margin 会经 sticky
+// 钳制与宿主滞后重测量反馈进实测 inset，两态 guard 互斥、渲染节奏驱动 ~5Hz 交替
+// （真机采样见 docs/scroll-bottom-oscillation.md）。
+//
+// 现状：状态条已移出滚动容器（见 check-statusbar-composer-dock.mjs），补偿逻辑整体删除，
+// margin 由宿主 timeline 的 padding-bottom 一次性算出，不参与任何反馈环。因此本回归的
+// 不变量变成两条，比原「两起点收敛」更强也更好测：
+//   1. margin 在整个采样期恒定（只允许至多一次初值写入）
+//   2. 状态条位置在滚动全程不随渲染帧变化
+const HOST_HTML = (SRC) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
-  .pane { width: 720px; margin: 0 auto; }
-  .chat { height: 400px; overflow-y: auto; }
-  .history { height: 298px; background: #f6f7f8; margin-bottom: 10px; }
-  .dock { position: sticky; bottom: 0; padding-bottom: 16px; background: #fff; }
+  .shell { display: flex; height: 600px; flex-direction: column; }
+  .pane { position: relative; display: flex; flex: 1 1 0%; min-height: 0; flex-direction: column; }
+  .timeline { position: relative; display: flex; min-height: 0; flex: 1 1 0%; flex-direction: column; padding-bottom: 16px; }
+  .scroll { min-height: 0; flex: 1 1 0%; overflow-y: auto; }
+  .content { display: flex; min-height: 100%; flex-direction: column; }
+  .history { height: 1600px; flex: none; background: #f6f7f8; }
+  .dock { position: sticky; bottom: 0; display: flex; width: 100%; }
+  .dock-content { width: 100%; padding: 0 8px; }
   .composer { border: 1px solid rgba(0,0,0,.14); border-radius: 14px; padding: 12px 14px; height: 72px;
     background: #fff; font-size: 13px; color: rgba(0,0,0,.36); }
   .hidden-usage { display: none; }
   .zsb-ring-fill, .zsb-ctxbar-fill, .zsb-ctxseg { transition: none !important; }
   .zsb-est, .zsb-pulse { animation: none !important; opacity: 1 !important; }
 </style></head><body>
-<div class="pane" data-session-id="sess_demo">
-  <div class="chat">
-    <div class="history">历史消息区：高度让 m=-12 时内容恰好贴底（无 sticky 钳制），m 清空时溢出 12px（sticky 钳制生效）。</div>
-    <div class="dock">
-      <div class="hidden-usage" data-usage-used="142600" data-usage-max="200000"></div>
-      <div data-zcode-composer class="composer">输入消息…</div>
+<div class="shell"><div class="pane" data-session-id="sess_demo">
+  <div class="timeline"><div class="scroll">
+    <div class="content">
+      <div class="history">历史消息区</div>
+      <div class="dock"><div class="dock-content">
+        <div class="hidden-usage" data-usage-used="142600" data-usage-max="200000"></div>
+        <div class="composer" data-testid="v4-composer">输入消息…</div>
+      </div></div>
     </div>
-  </div>
-</div>
+  </div></div>
+</div></div>
 <script>
   window.__ZCODE_STATUSBAR_BRIDGE__ = {
     getPaneId: function () { return 'workspace-main'; },
@@ -51,13 +63,14 @@ const STICKY_HOST_HTML = (SRC) => `<!doctype html><html lang="zh-CN"><head><meta
 <script>${SRC}</script>
 </body></html>`;
 
-// 采样一个阶段：记录 margin 状态集合与翻转次数，断言单一终态、无交替
-async function samplePhase(page, label, ms) {
-  const trace = await page.evaluate(async ({ label, ms }) => {
-    const sc = document.querySelector('.chat');
-    sc.scrollTop = 0;
+// 在给定滚动位置采样：记录 margin 状态集合、翻转次数与条位置
+async function sampleAt(page, scrollFrac, ms) {
+  return page.evaluate(async ({ scrollFrac, ms }) => {
+    const sc = document.querySelector('.scroll');
+    sc.scrollTop = (sc.scrollHeight - sc.clientHeight) * scrollFrac;
     const bar = document.querySelector('.zsb-bar');
-    const margins = new Map();
+    const margins = new Set();
+    const tops = new Set();
     let last = null;
     let flips = 0;
     const until = performance.now() + ms;
@@ -66,13 +79,13 @@ async function samplePhase(page, label, ms) {
       const m = bar.style.marginBottom || '""';
       if (m !== last) {
         if (last !== null) flips++;
-        margins.set(m, (margins.get(m) || 0) + 1);
+        margins.add(m);
         last = m;
       }
+      tops.add(Math.round(bar.getBoundingClientRect().top));
     }
-    return { label, margins: [...margins.entries()], flips };
-  }, { label, ms });
-  return trace;
+    return { scrollFrac, margins: [...margins], tops: [...tops], flips };
+  }, { scrollFrac, ms });
 }
 
 const browser = await chromium.launch({ executablePath: CHROME });
@@ -82,27 +95,25 @@ try {
   page.on('pageerror', (e) => errors.push(String(e)));
   const fs = await import('node:fs');
   const SRC = fs.readFileSync(new URL('../statusbar/statusbar.js', import.meta.url), 'utf8');
-  await page.setContent(STICKY_HOST_HTML(SRC));
+  await page.setContent(HOST_HTML(SRC));
   await page.waitForTimeout(1400);
 
-  // 阶段一：从「无补偿」起点出发（清空 margin，模拟 guard 判定失败后的状态）
-  await page.evaluate(() => { document.querySelector('.zsb-bar').style.marginBottom = ''; });
-  const fromCleared = await samplePhase(page, 'from-cleared', 900);
+  const phases = [];
+  for (const frac of [0, 0.5, 1]) phases.push(await sampleAt(page, frac, 900));
 
-  // 阶段二：从「已补偿 -12px」起点出发（模拟上一轮写入后的状态）
-  await page.evaluate(() => { document.querySelector('.zsb-bar').style.marginBottom = '-12px'; });
-  const fromCompensated = await samplePhase(page, 'from-compensated', 900);
+  const ctx = JSON.stringify({ phases, errors });
+  assert.deepEqual(errors, [], ctx);
 
-  const clearedEnd = fromCleared.margins.at(-1)?.[0];
-  const compensatedEnd = fromCompensated.margins.at(-1)?.[0];
-  const context = JSON.stringify({ fromCleared, fromCompensated, errors });
-  assert.deepEqual(errors, [], context);
-  // 阶段一从强制清零出发，首轮渲染合法写入一次补偿；除此只允许一个稳定态。
-  // 持续交替（flips 远超 1）才是反馈振荡。
-  assert.ok(fromCleared.margins.length <= 2 && fromCleared.flips <= 1, '阶段一不得持续交替: ' + context);
-  assert.equal(fromCompensated.margins.length, 1, '阶段二不得交替: ' + context);
-  assert.equal(clearedEnd, compensatedEnd, '两个起点的终态必须一致（判定不得依赖自身写入的补偿）: ' + context);
-  console.log('Passed scroll-stability: 终态 ' + clearedEnd + '，两起点判定一致');
+  for (const p of phases) {
+    assert.ok(p.flips <= 1, 'margin 不得持续交替（滚动 ' + p.scrollFrac + '）: ' + ctx);
+    assert.equal(p.tops.length, 1, '状态条位置不得随渲染帧变化（滚动 ' + p.scrollFrac + '）: ' + ctx);
+  }
+  // 全程只应有一个 margin 值：它由宿主 padding 一次性算出，不随滚动或渲染改变
+  const allMargins = new Set(phases.flatMap((p) => p.margins));
+  assert.equal(allMargins.size, 1, 'margin 在滚动全程恒定: ' + ctx);
+
+  const margin = [...allMargins][0];
+  console.log('Passed scroll-stability: margin 全程恒定 ' + margin + '，条位置不随帧变化');
   await page.close();
 } finally {
   await browser.close();
