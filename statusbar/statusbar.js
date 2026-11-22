@@ -1248,6 +1248,11 @@
   }
 
   function dockBottomMargin(bar, anchor) {
+    // 基准态测量：先清掉自身写入的补偿再取几何。补偿 margin 会经 sticky 钳制、flex
+    // 剩余空间与宿主滞后重测量（虚拟化列表、输入框自适应）反馈进实测 inset——真机
+    // 0.1.3 采样证实两态 guard 互斥、渲染节奏驱动持续交替。清零后每轮都从同一自然
+    // 几何收敛到同一目标，判定与写入解耦，振荡从结构上不可能。
+    bar.style.marginBottom = '';
     try {
       var pane = anchor.closest(SESSION_SELECTOR);
       if (!pane || !pane.contains(bar)) return null;
@@ -1291,10 +1296,13 @@
   function balanceDockGap() {
     if (!ui || !mountAnchor || !W.getComputedStyle) return;
     var bar = ui.bar;
+    // dockBottomMargin 测量前会清掉补偿，所以非 null 必须无条件写回——
+    // 同值重写不改变布局；若按「同值跳写」优化，清掉的补偿就不再恢复，
+    // 下一轮再写回，反而在基准态测量下制造新的两态交替。
     var next = dockBottomMargin(bar, mountAnchor);
     if (next == null) {
       if (bar.style.marginBottom) bar.style.marginBottom = '';
-    } else if (Math.abs(next - parseFloat(W.getComputedStyle(bar).marginBottom)) > 0.5) {
+    } else {
       bar.style.marginBottom = next + 'px';
     }
   }
@@ -1517,6 +1525,13 @@
   // 只读快照、永不抛错——诊断通道自身故障不得影响状态条主流程。
   function syncDiag(stage) {
     try {
+      var barState = null;
+      if (ui && ui.bar) {
+        barState = {
+          top: Math.round(ui.bar.getBoundingClientRect().top),
+          margin: ui.bar.style.marginBottom || null,
+        };
+      }
       W.__ZCODE_STATUSBAR_DIAG = {
         version: VERSION,
         stage: stage || null,
@@ -1529,6 +1544,7 @@
         hasTurn: !!W.__ZCODE_STATUSBAR_TURN__,
         hasSession: !!state.session,
         sessionReal: !!state.mounted,
+        bar: barState,
       };
     } catch (e) {
       /* 诊断写入失败静默 */

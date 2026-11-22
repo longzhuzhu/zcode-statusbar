@@ -1,12 +1,13 @@
 {
   "name": "zcode-statusbar",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "ZCode 客户端状态栏插件：生成速度、累计 token、缓存命中、子代理状态与官方上下文圆环增强",
   "scripts": {
     "test": "node --test tests/*.test.cjs",
     "test:layout": "node scripts/check-statusbar-layout.mjs",
-    "test:interaction": "node scripts/check-statusbar-interaction.mjs"
+    "test:interaction": "node scripts/check-statusbar-interaction.mjs",
+    "test:scroll-stability": "node scripts/check-statusbar-scroll-stability.mjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"
