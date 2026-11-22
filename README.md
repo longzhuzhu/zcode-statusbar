@@ -182,6 +182,8 @@ npm ci                                                  # 安装开发用浏览�
 npm run test:layout                                     # 会话面板布局回归（需 Chrome/Chromium）
 npm run test:interaction                                # AskUserQuestion 展开/回答/收起与逐帧稳定性
 npm run test:scroll-stability                           # 贴底间距补偿稳定性（sticky 宿主两起点判定一致）
+npm run test:composer-dock                              # 宿主 dock 内落点、间距、可见余量与热重载不累积
+npm run test:inject-chain                               # 四资产可重复注入（热重载后 statusbar 仍执行）
 ```
 
 `--dev` 模式不复制运行时，注入行指向克隆目录，改完 `statusbar/statusbar.js` 刷新窗口就能看到效果。切回标准安装，再跑一次不带 `--dev` 的。
