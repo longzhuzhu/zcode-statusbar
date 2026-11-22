@@ -89,6 +89,79 @@ function setup(config) {
 async function checkLayouts({ baseHtml, cases, setupSource }) {
   const results = [];
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  // 弹层水平锚定契约：弹层中心对齐被点 pill 中心；越界时夹进视口留 8px；
+  // 锚点 pill 被降级阶梯隐藏时弹层自动关闭。
+  // 分两段验证：先宽视口（不触发夹取）验居中，再逐步收窄验夹取与自动关闭。
+  async function checkPopAnchors(frame, config) {
+    const doc = frame.contentDocument;
+    const pane = doc.querySelector('[data-session-id]');
+    const bar = pane.querySelector('.zsb-bar');
+    const pop = pane.querySelector('.zsb-pop');
+    const usagePill = bar.querySelector('[data-zsb-pill="usage"]');
+    const pills = ['activity', 'usage', 'subagent', 'context', 'gear'];
+    const fail = message => {
+      throw new Error(message + ' ' + JSON.stringify({ config, anchor: pop.dataset.zsbAnchor }));
+    };
+    const openOn = name => {
+      // 已开在同一 pill 上就不再点（再点是 toggle 关闭）
+      if (pop.hidden || pop.dataset.zsbAnchor !== name) bar.querySelector('[data-zsb-pill="' + name + '"]').click();
+      if (pop.hidden) fail('Popover did not open on ' + name);
+      if (pop.dataset.zsbAnchor !== name) fail('Popover anchored to ' + pop.dataset.zsbAnchor + ' instead of ' + name);
+    };
+    const centerDeviation = pill => {
+      const a = pill.getBoundingClientRect();
+      const b = pop.getBoundingClientRect();
+      return { dx: Math.abs(a.left + a.width / 2 - (b.left + b.width / 2)), box: b };
+    };
+    // 未夹取的 pill 中心必被严格对准：没有这条，整个用例会被「全部夹取」蒙混过关
+    const expectCentered = (name) => {
+      const pill = bar.querySelector('[data-zsb-pill="' + name + '"]');
+      if (!pill || !pill.offsetWidth) return false;
+      openOn(name);
+      const { dx, box } = centerDeviation(pill);
+      const viewportW = doc.documentElement.clientWidth;
+      if (Math.abs(box.left - 8) < 1 || Math.abs(box.right - (viewportW - 8)) < 1) return false; // 被夹取
+      if (dx > 1) fail('Popover is not centered on its pill (' + name + ', dx=' + dx + ')');
+      return true;
+    };
+    const expectContained = name => {
+      const pill = bar.querySelector('[data-zsb-pill="' + name + '"]');
+      if (!pill || !pill.offsetWidth) return;
+      openOn(name);
+      const { box } = centerDeviation(pill);
+      const viewportW = doc.documentElement.clientWidth;
+      if (box.left < 8 - 0.5) fail('Popover overflows the left edge (' + name + ')');
+      if (box.right > viewportW - 8 + 0.5) fail('Popover overflows the right edge (' + name + ')');
+    };
+
+    // 1) 宽视口：中间的 pill 必须严格居中（activity/gear 在该宽度下会被夹取，只验完整可见）
+    frame.style.width = '800px';
+    await wait(150);
+    if (!expectCentered('usage')) fail('usage pill unavailable in the wide fixture');
+    if (!expectCentered('subagent')) fail('subagent pill unavailable in the wide fixture');
+    for (const name of pills) expectContained(name);
+
+    // 2) 收窄：贴边 pill 的弹层被夹进视口，仍整只可见
+    frame.style.width = '480px';
+    await wait(150);
+    for (const name of ['activity', 'gear']) expectContained(name);
+
+    // 3) 继续收窄到 usage pill 被 data-fit 隐藏：弹层必须自动关闭且不留锚点标记
+    if (usagePill && usagePill.offsetWidth) openOn('usage');
+    if (!pop.hidden) {
+      for (const width of [360, 320, 280, 240, 200]) {
+        frame.style.width = width + 'px';
+        await wait(150);
+        if (!usagePill.offsetWidth) break;
+      }
+      if (!usagePill.offsetWidth) {
+        if (!pop.hidden) fail('Popover stayed open after its anchor pill was hidden');
+        if (pop.getAttribute('data-zsb-anchor')) fail('Anchor marker left behind after auto-close');
+      }
+    }
+  }
+
   function check(frame, config) {
     const doc = frame.contentDocument;
     const pane = doc.querySelector('[data-session-id]');
@@ -154,6 +227,7 @@ async function checkLayouts({ baseHtml, cases, setupSource }) {
         const bar = pane.querySelector('.zsb-bar').getBoundingClientRect();
         const scale = bar.height / pane.querySelector('.zsb-bar').offsetHeight;
         if (Math.abs((bar.top - pop.bottom) / scale - 10) > 0.75) throw new Error('Popover gap changed');
+        await checkPopAnchors(frame, config);
       } else {
         await wait(80);
         const steady = check(frame, config);
