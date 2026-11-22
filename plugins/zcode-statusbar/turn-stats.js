@@ -182,6 +182,16 @@
       D.addEventListener('DOMContentLoaded', installBrowser, { once: true });
       return true;
     }
+    // 幂等：重复注入先停掉上一套采样循环，否则每轮多一个 100ms 定时器与观察器
+    // （内核注入在 dom-ready / did-finish-load 各触发一次，真机日志实证同毫秒两次）。
+    var prev = global.__ZCODE_STATUSBAR_TURN_API__;
+    if (prev && typeof prev.stop === 'function') {
+      try {
+        prev.stop();
+      } catch (e) {
+        /* 旧实例已失效：继续装配 */
+      }
+    }
 
     var dirty = true; // MutationObserver 脏标记：有 DOM 变化才需要读长度
     var lastReadAt = 0; // 最近一次成功读到长度的时间

@@ -29,6 +29,17 @@
   var W = window;
   var D = document;
 
+  // 幂等：同一页面只允许一个实例。内核注入路径里 dom-ready 与 did-finish-load
+  // 会在同一毫秒各触发一次（真机日志实证），且 hook 可能因重复注册叠加监听；
+  // 实例自己接管清理，第二次进入时先让前一个实例完全停手再继续。
+  if (typeof W.__ZCODE_STATUSBAR_DISPOSE__ === 'function') {
+    try {
+      W.__ZCODE_STATUSBAR_DISPOSE__();
+    } catch (e) {
+      /* 前一个实例清理失败：继续装配，残留由下方孤儿清理兜底 */
+    }
+  }
+
   // ================= 配置常量区 =================
 
   var VERSION = String(W.__ZCODE_STATUSBAR_VERSION__ || '0.2.1');
@@ -41,9 +52,12 @@
 
   // 输入框挂载锚点候选，自上而下取第一个命中者。
   // ZCode 宿主 DOM 未公开稳定锚点，候选为启发式，需实机校准。
+  // 3.19.1 宿主没有 data-v4-composer 属性，实锚点是 data-testid="v4-composer"
+  // （ConversationComposer 根节点，class 为 chat-composer-region）。
   var MOUNT_ANCHORS = [
     '[data-zcode-composer]', // 未来官方/内核预留标记（乐观候选）
     '[data-v4-composer]',
+    '[data-testid="v4-composer"]', // 3.19.1 宿主实锚点
     'form[class*="composer" i]',
     '[class*="composer" i]',
     '[class*="prompt-editor" i]',
@@ -1247,6 +1261,15 @@
     return false;
   }
 
+  // 最近的可裁剪祖先：状态条超出它的下沿即被裁掉，超出部分不可见也不可回收。
+  function clippingAncestor(node, pane) {
+    for (var n = node.parentElement; n && n !== pane; n = n.parentElement) {
+      var ov = W.getComputedStyle(n).overflowY;
+      if (ov && ov !== 'visible') return n;
+    }
+    return pane;
+  }
+
   function dockBottomMargin(bar, anchor) {
     // 基准态测量：先清掉自身写入的补偿再取几何。补偿 margin 会经 sticky 钳制、flex
     // 剩余空间与宿主滞后重测量（虚拟化列表、输入框自适应）反馈进实测 inset——真机
@@ -1270,21 +1293,25 @@
       var margin = parseFloat(barStyle.marginBottom);
       if (!isFinite(gap) || gap < 0 || !isFinite(margin)) return null;
 
+      // 只在最近的裁剪祖先内回收空白。宿主 dock 位于滚动容器内时，容器外的
+      // padding（如真机 timeline 的 pb-4）不在可视区内，回收它会把状态条压到裁剪
+      // 边界上，余量归零后被裁掉——真机 3.19.1 实测该情形下条底正好落在视口底。
+      var clip = clippingAncestor(bar, pane);
       var inset = 0;
       var node = bar;
-      while (node !== pane) {
+      while (node !== clip) {
         if (hasFlowContentAfter(node)) return null;
         var parent = node.parentElement;
         if (!parent) return null;
         var cs = W.getComputedStyle(parent);
         inset += parseFloat(cs.paddingBottom) || 0;
-        if (parent !== pane) inset += parseFloat(cs.borderBottomWidth) || 0;
+        if (parent !== clip) inset += parseFloat(cs.borderBottomWidth) || 0;
         if (node !== bar) inset += parseFloat(W.getComputedStyle(node).marginBottom) || 0;
         node = parent;
       }
-      var paneStyle = W.getComputedStyle(pane);
-      var bottom = pane.getBoundingClientRect().bottom - (parseFloat(paneStyle.borderBottomWidth) || 0) * scale;
-      var measuredInset = (bottom - box.bottom) / scale - margin;
+      var clipStyle = W.getComputedStyle(clip);
+      var refBottom = clip.getBoundingClientRect().bottom - (parseFloat(clipStyle.borderBottomWidth) || 0) * scale;
+      var measuredInset = (refBottom - box.bottom) / scale - margin;
       // 只回收能由面板内部 padding/border/margin 解释的空白，不占用外框间隙或未识别的内容区。
       if (!isFinite(inset) || !isFinite(measuredInset) || Math.abs(measuredInset - inset) > 1) return null;
       return gap - inset;
@@ -1557,6 +1584,7 @@
 
   var mountTimer = null;
   var mountAnchor = null; // 当前挂载的输入框容器（用于检测宿主换 DOM 后重挂）
+  var disposers = []; // 全局监听/定时器的清理函数，热重载时由 dispose() 统一回收
 
   // 会话身份：以挂载点所在 SessionPane 的 data-session-id 为准。
   // "draft" = 首页/新建任务，没有会话数据；找不到所属 pane 也按无会话处理（R10：宁可不显示）。
@@ -1722,30 +1750,36 @@
   // 全局监听只注册一次：turn/session 事件在 bar 未挂载时也要收，挂载后才能立刻出数据。
   function bindGlobalEvents() {
     // 外点关闭（capture 阶段；点击 pill 本身交给 pill 的 toggle 处理，避免闪烁）
-    D.addEventListener('click', function (ev) {
+    var onDocClick = function (ev) {
       if (popMode == null || !ui) return;
       var t = ev.target;
       if (ui.pop.contains(t)) return;
       if (t.closest && t.closest('[data-zsb-pill]')) return;
       closePop();
-    }, true);
+    };
+    D.addEventListener('click', onDocClick, true);
+    disposers.push(function () { D.removeEventListener('click', onDocClick, true); });
 
     // Escape 关闭
-    D.addEventListener('keydown', function (ev) {
+    var onKeydown = function (ev) {
       if (ev.key === 'Escape' && popMode != null) closePop();
-    });
+    };
+    D.addEventListener('keydown', onKeydown);
+    disposers.push(function () { D.removeEventListener('keydown', onKeydown); });
 
     // turn 样本：turn-stats.js → 本 UI
-    W.addEventListener(EV.TURN, function (ev) {
+    var onTurn = function (ev) {
       var d = ev && ev.detail;
       if (d && typeof d === 'object') {
         state.turn = d;
         render();
       }
-    });
+    };
+    W.addEventListener(EV.TURN, onTurn);
+    disposers.push(function () { W.removeEventListener(EV.TURN, onTurn); });
 
     // 会话聚合：内核主进程推送（detail = { ...zusage 快照, aggregate }，经 normalizeSession 取 aggregate）
-    W.addEventListener(EV.SESSION, function (ev) {
+    var onSession = function (ev) {
       var owner = sessionOwner(ev && ev.detail);
       // 换了会话就直接丢上一会话的粘滞标志与面板位置：同一窗格切会话时 paneId 不变、
       // unmountBar 不触发，只靠卸载路径重置会让上一个会话的子代理把新会话的 pill 一直点亮。
@@ -1767,21 +1801,26 @@
         render();
         refreshLivePop(); // 活弹层跟着刷新（子代理读数、活动耗时与曲线都在变）
       }
-    });
+    };
+    W.addEventListener(EV.SESSION, onSession);
+    disposers.push(function () { W.removeEventListener(EV.SESSION, onSession); });
 
     // 周期渲染：估算态 3s 过期 → 核实态；tabular-nums + min-height 保证无跳动。
     // 常驻而非随 bar 建立，重挂后不会叠加多个定时器。
-    setInterval(function () {
+    var renderTimer = setInterval(function () {
       render();
     }, 1000);
+    disposers.push(function () { clearInterval(renderTimer); });
 
     // 主题变化（深浅切换）时重采变量
     try {
       var mq = W.matchMedia('(prefers-color-scheme: dark)');
       if (mq && typeof mq.addEventListener === 'function') {
-        mq.addEventListener('change', function () {
+        var onScheme = function () {
           if (ui) applyThemeVars(ui.bar);
-        });
+        };
+        mq.addEventListener('change', onScheme);
+        disposers.push(function () { mq.removeEventListener('change', onScheme); });
       }
     } catch (e) {
       /* 老宿主无 matchMedia 监听：忽略 */
@@ -1800,6 +1839,51 @@
     st.textContent = CSS;
     D.head.appendChild(st);
   }
+
+  // 内核注入热重载入口（inject-main.cjs injectStatusbar(reload) 先调它再重新执行本脚本）：
+  // 拆条、清定时器与监听，否则旧实例的 bar 与渲染循环留在页面里，每轮重载叠加一条。
+  function dispose() {
+    if (mountTimer) {
+      clearInterval(mountTimer);
+      mountTimer = null;
+    }
+    while (disposers.length) {
+      try {
+        disposers.pop()();
+      } catch (e) {
+        /* 单个清理失败不阻断其余 */
+      }
+    }
+    if (resizeObserver) {
+      try {
+        resizeObserver.disconnect();
+      } catch (e) {
+        /* 已断开：忽略 */
+      }
+      resizeObserver = null;
+    }
+    closePop();
+    if (ui && ui.bar && ui.bar.parentNode) ui.bar.parentNode.removeChild(ui.bar);
+    ui = null;
+    mountAnchor = null;
+    state.mounted = false;
+  }
+
+  W.__ZCODE_STATUSBAR_DISPOSE__ = dispose;
+
+  // 历史遗留清理：旧版本没有 dispose，热重载每轮留下一条孤儿 bar（真机实测会叠成
+  // 两条并存，一条贴裁切边、一条正常，表现为「位置有时在上有时在下」）。新实例
+  // 启动时扫一次同页孤儿并移除，之后由 DISPOSE 保证不再产生。
+  (function pruneOrphanBars() {
+    try {
+      var stale = D.querySelectorAll('.zsb-bar');
+      for (var i = 0; i < stale.length; i++) {
+        if (stale[i].parentNode) stale[i].parentNode.removeChild(stale[i]);
+      }
+    } catch (e) {
+      /* 只读页面兜底：清不掉不影响本轮挂载 */
+    }
+  })();
 
   injectStyle();
   bindGlobalEvents();

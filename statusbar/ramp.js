@@ -25,6 +25,11 @@
 
 'use strict';
 
+// 顶层 const/function 进的是页面全局词法环境：同一页面注入第二次会抛
+// "Identifier 'NEUTRAL_COLOR' has already been declared"，在内核注入链里会中断
+// 后续 statusbar.js（热重载静默失效）。用 IIFE 把模块作用域收紧到函数内。
+(function () {
+
 /* ============================ 常量区 ============================ */
 
 /**
@@ -226,8 +231,8 @@ function contextColor(pct) {
 /* ============================== 导出 ============================== */
 
 // 环境检测：CommonJS（Node require / 宿主注入 loader）为主契约；
-// 无模块系统环境（renderer 注入 IIFE 拼装）时兜底挂 globalThis，供 statusbar.js 取用。
-const HAS_COMMONJS = typeof module !== 'undefined' && module != null
+// 无模块系统环境（renderer 注入）时兜底挂 globalThis，供 statusbar.js 取用。
+var HAS_COMMONJS = typeof module !== 'undefined' && module != null
   && module.exports !== undefined;
 
 if (HAS_COMMONJS) {
@@ -242,3 +247,5 @@ if (HAS_COMMONJS) {
     CONTEXT_ANCHORS,
   };
 }
+
+})();
